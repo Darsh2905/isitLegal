@@ -1,0 +1,53 @@
+[project]
+name = "isitlegal"
+version = "0.1.0"
+description = "Deterministic citation verification for Indian legal RAG"
+requires-python = ">=3.9"
+
+# Pinned deliberately. Every number in the paper must be reproducible by
+# running a script in eval/ (CLAUDE.md invariant 6), which is only true if the
+# dependency versions those numbers were measured on are recorded.
+#   rank_bm25  -- BM25 baseline retrieval (the ablation anchor)
+#   snowballstemmer -- Porter2 stemming for BM25 and the confidence
+#                 gate's term statistics (retrieval/text.py). Pure
+#                 Python, deterministic, no model.
+#   rapidfuzz  -- string matching in the verifier. NOT a model: no inference,
+#                 no learned similarity. See CLAUDE.md invariant 1.
+#   numpy      -- transitive requirement of rank_bm25; pinned for determinism.
+#   beautifulsoup4, pdfplumber -- real-corpus ingestion (ingest/).
+#   torch, transformers, sentence-transformers -- dense retrieval and
+#                 reranking (retrieval/dense.py, rerank.py). Outside verify/,
+#                 same as rapidfuzz's exemption above (invariant 1) does not
+#                 apply here since dense retrieval is not part of the
+#                 deterministic layer to begin with.
+#   anthropic, groq -- generation/generator.py's real clients; only imported
+#                 if a matching credential is configured. GroqClient is the
+#                 one this project has actually exercised against a live
+#                 model.
+dependencies = [
+    "rank_bm25==0.2.2",
+    "snowballstemmer==2.2.0",
+    "rapidfuzz==3.14.5",
+    "numpy==1.26.4",
+    "beautifulsoup4==4.12.3",
+    "pdfplumber==0.11.9",
+    "torch==2.11.0",
+    "transformers==5.8.0",
+    "sentence-transformers==5.4.1",
+    "anthropic",
+    "groq==0.37.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.4"]
+# app.py -- a presentation aid, not part of the research artifact.
+demo = ["streamlit==1.45.1", "plotly==6.3.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Tests assert on the metrics dicts returned by eval/run_*.py `report()`
+# functions, which also print the human-readable tables used in the paper.
+# Those tables are captured by default and shown on failure; pass -s to see
+# them on a passing run.
+addopts = "-q --strict-markers"
+python_files = ["test_*.py"]

@@ -1,0 +1,28 @@
+# Secrets -- never commit
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Build artifacts
+paper.log
+paper.aux
+paper.bbl
+paper.blg
+paper.out
+
+# Scraped corpus cache (large, reproducible from ingest/scrape_*.py)
+data/raw/*.html
+data/raw/*.pdf
+data/raw_judgments/*.html
+
+# Generated documents / non-code files
+*.pdf
+*.pptx
+*.log
+*.aux
+*.out
+abstract.tex
+.DS_Store

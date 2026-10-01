@@ -1,0 +1,30 @@
+# Runtime dependencies, pinned to the versions every number in eval/ was
+# measured on (CLAUDE.md invariant 6). Mirrors pyproject.toml.
+rank_bm25==0.2.2
+snowballstemmer==2.2.0
+rapidfuzz==3.14.5
+numpy==1.26.4
+
+# Real-corpus ingestion (ingest/scrape_indiankanoon.py, scrape_correspondence.py).
+beautifulsoup4==4.12.3
+pdfplumber==0.11.9
+
+# Dense retrieval and reranking (retrieval/dense.py, rerank.py). NOT inside
+# verify/ -- see CLAUDE.md invariant 1. torch/transformers pull in real model
+# weights on first use (InLegalBERT ~500MB, MiniLM/cross-encoder much smaller).
+torch==2.11.0
+transformers==5.8.0
+sentence-transformers==5.4.1
+
+# Generator interface (generation/generator.py) real clients. Each is only
+# needed if its matching credential is configured -- optional at import time
+# otherwise. GroqClient is the one this project has actually exercised live.
+anthropic
+groq==0.37.1
+
+# Demo (app.py) -- not part of the research artifact; a presentation aid.
+streamlit==1.45.1
+plotly==6.3.0
+
+# Test/regression harness.
+pytest==8.3.4

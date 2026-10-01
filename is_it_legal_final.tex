@@ -1,0 +1,867 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{iftex}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+% IEEE uses Times. Under XeTeX (tectonic) Times is reached through
+% TeX Gyre Termes; under pdfLaTeX through newtx.
+\ifXeTeX
+  \usepackage{newtxmath}
+  \usepackage{fontspec}
+  \setmainfont{texgyretermes}[Extension=.otf,
+    UprightFont=*-regular, BoldFont=*-bold,
+    ItalicFont=*-italic, BoldItalicFont=*-bolditalic]
+  \setmonofont{texgyrecursor}[Extension=.otf,
+    UprightFont=*-regular, BoldFont=*-bold,
+    ItalicFont=*-italic, BoldItalicFont=*-bolditalic]
+\else
+  \usepackage[T1]{fontenc}
+  \usepackage{newtxtext,newtxmath}
+\fi
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+
+\begin{document}
+
+\title{Is It Legal? A Retrieval-Augmented Generation Engine with Deterministic Citation Verification for Indian Statutory and Case Law}
+
+\author{\IEEEauthorblockN{Darsh Sharma}
+\IEEEauthorblockA{24BDS0082}
+\and
+\IEEEauthorblockN{Pradyun Shahi}
+\IEEEauthorblockA{24BDS0052}
+}
+
+\maketitle
+
+\begin{abstract}
+Large language models answer legal questions confidently and fluently, but many of their citations are fabricated. Hallucinations for verifiable legal questions run 58--88\% even at temperature zero, as models cannot reliably self-assess their own output. In India, the July 2024 recodification of the criminal-law framework worsens the problem: the Indian Penal Code, Code of Criminal Procedure, and Indian Evidence Act were replaced by the Bharatiya Nyaya Sanhita, Bharatiya Nagarik Suraksha Sanhita, and Bharatiya Sakshya Adhiniyam, renumbering sections. Every surveyed Indian legal RAG system reduces hallucinations but does not remove them, since the control is statistical and not deterministic. As such, we present Is It Legal, the first Indian legal RAG system whose verifier is built entirely from regex, database lookups, and string matching, with no model being used for verification, preventing the verifier from hallucinating. Tested on a real, sourced, 3,275-provision statutory corpus, it detected 17 of 17 planted citation faults with zero false flags. Evidence-bounded repair recovered 16.7 percentage points of coverage while maintaining the guarantee of correctness. On answers written by an independently invoked model, it raised citation resolution from 0.966 to 1.000 while keeping 97.2\% of sentences, at a median cost of 1.9\,ms per answer. Its hybrid retrieval stack reaches an MRR@10 of 0.821, and a calibrated abstention gate refuses all eight held-out out-of-scope queries. Unlike other surveyed systems, whose correctness is determined statistically, our system guarantees by construction that every emitted citation resolves.
+\end{abstract}
+
+\begin{IEEEkeywords}
+retrieval-augmented generation, legal NLP, citation verification, hallucination, Indian law, recodification
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+Legal research in India is heavily hampered by bureaucracy and fragmented court records, making it slow and expensive. A lawyer or an ordinary individual asking whether an act is legal or not --- what statues or previous rulings support or discredit the user's conclusion. It has to be provided in a way that can be verified by individual before its application.
+
+When legal questions are given to large language models (LLMs) they give answers that sound confident that are legally-verbose and sound like legally succinct information to non-practicing individuals. The problem is that a large fraction of answers are wrong, and can be very damaging as citations can be completely fabricated via LLM hallucinations. Dahl et al. \cite{dahl2024} queried multiple LLMs with verified questions about random United States federal cases finding out 58\% of answers from GPT-4 and 88\% from Llama-2 were hallucinated at temperature zero. Models are not trained properly to handle legal hallucinations, they cannot flag their own answers as wrong, and in What-If scenarios they frequently accept and continue with the user's premise even if it has no legal standing.
+
+Three features of the Indian legal system worsen the problem:
+
+\begin{enumerate}
+\item Exact-reference density. Legal questions are entity-heavy. They depend heavily on the exact semantic phrasing, any deviation can give a completely wrong answer. If the query mentions ``Section 138 of the Negotiable Instruments Act'' must match exactly but changing it to Section 139 provides the wrong answer.
+\item Statutory volatility. In July 2024 the Indian Penal Code, Code of Criminal Procedure, and Indian Evidence Act were replaced by the Bharatiya Nyaya Sanhita (BNS), Bharatiya Nagarik Suraksha Sanhita (BNSS), and Bharatiya Sakshya Adhiniyam (BSA) respectively \cite{dixit2025}. Sections were rearranged and renumbered. Any system trained or indexed on the pre-2023 codes is now systematically misaligned with current law.
+\item Document length and structure. Indian court judgements, particularly Supreme and High Court judgements can be tens of thousands of words, causing keyword/frequency saturation and exceed LLM context or vector embedding limits.
+\end{enumerate}
+
+Retrieval-Augmented Generation \cite{lewis2020} is the answer to reduce hallucinations further, providing provenance (answers traceable to retrieved evidence) and updatability (swapping the index updates the system's knowledge without any training being required). However, evidence gathered in Section~II shows that grounding alone is not enough. Reading papers on already publish Indian legal RAG systems shows that hallucination decreases continuously with increased architectural sophistication --- with hallucinations becoming 30.6\% for ungrounded generation, 16.9\% for vanilla RAG, and 6.3\% for a graph-augmented adversarial architecture \cite{bindra2026} --- no architecture reaches zero. The problem is in every case the control mechanism is statistical or human-monitored, and can never be a guaranteed correct answer.
+
+\subsection{Contributions}
+
+The paper proposes a system placed precisely at the point where there is a remaining gap or what's left unsolved:
+
+\begin{itemize}
+\item C1 --- A deterministic citation verifier. A post-processing layer that is model-free. Every citation marker must point to a retrieved chunk of text. Quoted text must match the original legal text by using token-level matching and have 95\% accuracy.
+\item C2 --- A unified statute--judgment corpus with re-codification mapping. A bidirectional IPC$\leftrightarrow$BNS mapping function between CrPC$\leftrightarrow$BNSS and IEA$\leftrightarrow$BSA with automatic transition allowing to identify and handle statues before re-structuring.
+\item C3 --- A calibrated abstention gate. Provides an external confidence threshold, trained using development split and evaluated on unanswerable queries, permitting the system to report when the answer it provides is invalid.
+\item C4 --- A standardised, comparable evaluation protocol combining community relevance judgements, reference-free RAG metrics and deterministic citation metrics along with adversarial false-premise probes.
+\item C5 --- Index-time cross-reference resolution. Statutory references are resolved when the corpus is indexed and stored as a citation graph, so provisions whose text only points elsewhere can still be reached.
+\end{itemize}
+
+\section{Related Work}
+
+The literature is organized into five threads that jointly explain the design space.
+
+\subsection{Thread A: Foundations of Retrieval-Augmented Generation}
+
+Lewis et al. \cite{lewis2020} explain RAG as a general recipe made of a parametric generator with a non-parametric index. Karpukhin et al. \cite{karpukhin2020} showcased that the Dense Passage Retrieval (DPR) used for a dual-encoder architecture trained with in-batch negatives heavily outperforms the BM25 on open-domain retrieval. DPR is a dense retriever which is consequential for law since this type of retriever performs worse when dealing with rare tokens --- especially the sections with numbers and act names that are predominant in legal queries. This complementary nature based on empirical finding the root of the belief that hybrid-retrieval is needed.
+
+Sun \cite{sun2025} built and operated a system that applied the hybrid-retrieval method. It uses AH-RAG system that combines keyword search (BM25) and vector search (BGE-small/FAISS). It calculates a custom weight for every query based on how complex the user's question is. On a stardard benchmark test (Natural Questions), combining search methods increased retrieval accuracy (Recall@20) from 52.4\% to 67.7\% while making the retrieval time oly 4.8\% slower. Shifting the search mix dynamically added 1-3 accuracy and using confidence scores as guides for the LLM added 0.5-1.5 on exact-match scoring. The two takeaways are that you cannot use a fixed ratio for the search methods --- the balance must change depending on the query. Passing a confidence score to LLM from the retrieval system reduces hallucinations.
+
+\subsection{Thread B: Adaptive Retrieval and Long Documents}
+
+Asai et al. \cite{asai2023} tee train a language model to emit reflection tokens controlling its retrieval behavior --- whether to check if the passage is relevant, output is supported, whether to retrieve or if the response is useful --- showing an increase in factuality and accuracy of output even if it is long-form generation. Reflection tokens are beyond the scope of this system but it provides justification for two of our components: an abstention check and post-generation support. Our deterministic verifier is essentially a hard-coded analogue for Self-RAG output critique.
+
+Sarthi et al. \cite{sarthi2024} discusses the compatibility issues between flat chunk retrieval and document-level questions. The chunks are clustered and embedded into a tree with the top nodes containing more general summaries by using the recursive RAPTOR. This improved accuracy on the QuALITY long-document bench-mark by roughly 20 points when combined with GPT-4. The application is immediate and motivates our retrieval design.
+
+\subsection{Thread C: Legal-Domain Language Models and Indian Resources}
+
+Chalkidis et al. \cite{chalkidis2020} released LEGAL-BERT, which is pre-trained on legal text, showing increased gains over a generic BERT and demonstrates that sub-domain adaption is important. Zheng et al. \cite{zheng2021} asks when is does domain pre-training matter, which was showcased by CaseLawBERT showing that gains are largest when the task is specific to a domain and difficult.
+
+Paul et al. \cite{paul2023} applied this to Indian law, pre-training InLegalBERT and InCaseLawBERT checkpoints. InLEgalBERT and performs better than previous general and foreign-legal-domain models. It was trained using 5.4 million Indian court documents from the years 1950-2019. The conclusion drawn is that Indian legal text is sufficiently distinct enough in terms of convention, drafting style, and register --- that even legal-domain foreign models are suboptimal.
+
+For corpora and benchmarks, Malik et al. \cite{malik2021} added ILDC, approximately 35,000 annotated Supreme Court judgements, together with the Court Judgment Prediction and Explanation task, documenting a gap between models and expert explantions. Joshi et al. \cite{joshi2024} brought the field together with IL-TUR, dealing with the rhetorical role labelling, handling named-entity recognition, predicting judgements and bail, summarization and most importantly for us --- a legal statue identification system and previous case retrievals. Their baselines indicate that no model such as GPT-3.5 and GPT-4 perform well across tasks. The FIRE AILA track \cite{bhattacharya2019} is the only Indian shared task made for retrieval, giving relevant judgements for precedence and statue retrieval.
+
+\subsection{Thread D: Applied Legal RAG Systems}
+
+There are six systems that are the closest to our work. Table~I summarizes them.
+
+\begin{table*}[t]
+\caption{Applied Legal RAG Systems: Architecture, Results, and Limitations}
+\label{tab:applied}
+\centering
+\footnotesize
+\begin{tabular}{@{}p{2.0cm}p{2.1cm}p{3.0cm}p{4.0cm}p{4.5cm}@{}}
+\toprule
+\textbf{System} & \textbf{Corpus} & \textbf{Retrieval} & \textbf{Reported Results} & \textbf{Limitation for Our Purposes} \\
+\midrule
+BNS Mitra \cite{patil2025} & BNS statute & Dense only (FAISS), char-split chunks & 87\% accuracy; RAG $+$12 pts over non-RAG & Character chunking; fails multi-section fact patterns; no verification \\
+\addlinespace
+Nyaya-Sathi \cite{dixit2025} & BNS statute & Dense only (ChromaDB), metadata tags & P@1 0.85 vs 0.60; citation acc. 0.92 vs 0.70; halluc. 0.25$\rightarrow$0.05 & Verification partly human; no case law; no hybrid retrieval \\
+\addlinespace
+Constitutional Compass \cite{bolla2026} & Constitution of India & InLegalBERT $+$ BM25 $+$ RRF $+$ cross-encoder & Hybrid F1 89.4\%; hybrid $>$ both single arms & No abstention; no hallucination metrics; single corpus \\
+\addlinespace
+Dual-Layer Legal-RAG \cite{bindra2026} & 10K SC judgments $+$ Constitution $+$ CrPC & Dense $+$ citation-graph multi-hop; adversarial module & Acc. 63\%$\rightarrow$77\%; halluc. 30.6/16.9$\rightarrow$6.3\%; cite acc. 1.8/67.4$\rightarrow$96.1\% & Residual 6.3\% hallucination; 15.3\,s latency; statistical not deterministic control \\
+\addlinespace
+Tax Law RAG \cite{rustamov2025} & Azerbaijani Tax Code (240 articles) & BM25/SPLADE $+$ 3 dense $+$ hybrid $+$ cross-encoder & Best single recall@100 0.49; hybrid 0.60; NDCG 0.39$\rightarrow$0.44, MRR 0.60$\rightarrow$0.39 & Non-Indian; no generation stage; cross-reference failure unresolved \\
+\addlinespace
+AH-RAG \cite{sun2025} & Natural Questions & Adaptive hybrid fusion $+$ confidence-weighted decoding & R@20 52.4\%$\rightarrow$67.7\%; $+$4.8\% latency & Open-domain, not legal; no citation guarantee \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Patil et al. \cite{patil2025} built BNS Mitra, which maps informal description of events to BNS sections. LLaMA-2 takes the input query from the user and reforms into legal jargon; this rephrased query is then embedded and matched again the FAISS index of the BNS chunks which are produced by a character splitter recursively. On 500 queries which were verified by lawyers the system achieved 87\% accuracy. RAG contributed an improvement by 12-points over non-RAG systems. Accuracy was higher on straight-forward queries but is decayed with more complex queries since multiple sections could apply. Their own examples show questionable output, with a bodily-assault scenario showing mischief provisions. The lessons to follow: rewriting query to have more legal terminology is better; chunking of statues is a defect that can be corrected with section-boundary chunking; multi-section applicability is hard case that must be evaluated individually per section.
+
+Dixit et al. \cite{dixit2025} showed Nyaya-Sathi, using recodification. BNS sections with metadata are embedded into ChromaDB; retrieved sections are structured via an LLM API with a post-processing stage checking the generated citations against the database, removing unverified output. They reported Precision@1 of 0.85 again 0.60 without RAG, citation accuracy of 0.92 against 0.70, and hallucination reduced from 0.25 to 0.05. The authors mention that the verification stage involves confirmation from human-expert and they mention the limitation of statues-only coverage, absence of case law and cross-references, and a small evaluation user base was mentioned as well.
+
+Bolla et al. \cite{bolla2026} implement architecture which is closest to our retrieval system. Their architecture is applied to the Indian Constitution: each article is doubly indexed as a InLegalBERT dense vector and a BM25 lexical index, this is then merged by Reciprocal Rank Fusion, reranked by a cross-encoder (MiniLM) and finally summarized by an LLM. They report a hubrid F1 of 89.4\% with hybrid retrieval performing better than single-arm configurations in both precision and recall, and F1 --- a clean confirmation of the sparse-plus-dense-plus-rerank consensus on Indian legal text specifically. The systems however does not provide abstention mechanism and does not report hallucination metrics.
+
+Bindra et al. \cite{bindra2026} made the most ambitious Indian system by indexing over 10,000 Supreme Court judgements along with the Constitution and CrPC with both as a dense vector and as a citation graph. They performed multi-hops with constraints to recover related precedents which did not share any semantics in the query. Inspired by GAN, an adversarial module retrieves supporting and opposing arguments, with a discriminative evaluator which critiques biased, one-sided or unsupported output. Accuracy increases from 63\% to 77\%; with groundedness from 0.43 (LLM-only) and 0.73 (vanilla RAG) to 0.95; precedent recall from 0.56 and 0.72 to 0.87; hallucination falls from 30.6\% and 16.9\% to 6.3\%; and citation accuracy increases from 1.8\% and 67.4\% to 96.1\%, at a latency cost of 2.5s to 15.3s. They did a case study on arrest powers provided under Section 41 CrPC shows that only the graph-augmented configuration showed the constitutional dimension (Articles 21 and 22) alongside the statue. This gives us three implications: the 1.8\% citation accuracy of ungrounded generation is a striking Indian-law confirmation of Dahl et al.; citation-graph traversal is also the strongest case for relational structure; and the remaining 6.3\% hallucinations persists because of the controls being statistical instead of deterministic.
+
+Rustamov et al. \cite{rustamov2025} give the cleanest and most methodical study in this thread, although on the Azerbaijani Tax Code --- being a different jurisdiction from our own, it also has the same structural problems as Indian law. Out of 5,657 citizen question-answer pairs 2,178 were kept which were answerable purely from the Code's 240 articles, chunked at 300 tokens with 60-token overlap after doing an analysis of article length distribution (mean: 1,500 tokens; median: 670 tokens). Two sparse and three dense retrievers across six IR metrics are benchmarked, finding the best retriever (BGE-m3) reaches only 0.49 recall@100; weighted hybrid BM25+BGE-m3 brings recall upto 0.60; cross-encoder reranking improves NDCG from 0.39 to 0.44 while the MRR is decreased from 0.60 to 0.39, which fails to promote the first relevant document. Their analysis of the error is the paper's most valuable contribution. Retrieval failures concentrate on articles that are not semantically self-contained because they cross-referenced other articles. The authors argue knowledge-graph structure to resolve.
+
+\subsection{Thread E: Hallucination Measurement and RAG Evaluation}
+
+Dahl et al. \cite{dahl2024}, discussed in Section~I, supply both the motivating measurement and a typology distinguishing fidelity to inputs, to training data, and to legal fact. Es et al. \cite{es2023} introduced RAGAS, they evaluated RAG pipelines without gold answers and break the evaluation into faithfulness, answer and context relevance; each of which was scored by structured LLM prompting. RAGAS supplies three of our evaluation metrics. RAGAS has a known limitation; that LLM-as-judge scores themselves are fallible and cannot guarantee to be hallucination-free. This is precisely why our system combines RAGAS with deterministic citation checks.
+
+\subsection{Convergent Findings}
+
+Read together, five conclusions repeat with sufficient independence across the surveyed corpus to be treated as established:
+
+\begin{enumerate}
+\item Hybrid retrieval is a consensus, not a design choice. Every study comparing sparse, dense, and hybrid configurations --- AH-RAG on open-domain QA \cite{sun2025}, Rustamov et al. on statutory text \cite{rustamov2025}, Constitutional Compass on Indian constitutional text \cite{bolla2026} --- found that hybrid configurations are better. The two studies from the corpora that were built for Indian systems show exactly the same failure modes that sparse retrieval helps with.
+\item Retrieval, not generation, is the recall bottleneck. A 0.49 single-model recall ceiling \cite{rustamov2025} and the precedent-recall gains from graph traversal \cite{bindra2026} both show the hard problem in finding the correct authority for a query.
+\item Grounding reduces but does not eliminate hallucination. The progression 30.6\% $\rightarrow$ 16.9\% $\rightarrow$ 6.3\% \cite{bindra2026}, and 0.25 $\rightarrow$ 0.05 with partly manual verification \cite{dixit2025}, is consistently showing decrease. No surveyed system reaches zero, and none of them implement a fully deterministic, automatic verification system.
+\item Domain adaptation compounds. LegalBERT improves on BERT \cite{chalkidis2020}; CaseLawBERT clarifies the conditions \cite{zheng2021}; InLegalBERT improves on both for Indian tasks \cite{paul2023}.
+\item Statutory cross-references defeat flat semantic retrieval. Articles that merely reference other articles are effectively invisible to embedding --- which is confirmed by error analysis \cite{rustamov2025} and by graph-traversal gains \cite{bindra2026}.
+\end{enumerate}
+
+\section{Research Gaps}
+
+From the above parts we isolate five gaps, each of which is documented and mapped in Table~II to a corresponding contribution.
+
+G1 --- No deterministic citation verification. Throughout all six applied systems, hallucination control is statistical (adversarial evaluators, confidence weighting) or with manual oversight. No system resolves that the output is mapped to a retrieved source, or that quoted string text-match their sources or that citated provisions carry current repeal status.
+
+G2 --- No system spans statutes and case law with recodification mapping. BNS Mitra and Nyaya-Sathi cover only the BNS; Constitutional Compass only the Constitution; Dual-Layer covers judgments and the CrPC. The recodification is seen as primary motivating problem \cite{dixit2025} but none of the surveyed systems shows or implements a bidirectional old-new section mapping.
+
+G3 --- No calibrated abstention in legal RAG. Confidence mechanisms are demonstrated in open-domain QA \cite{sun2025}, and the recall ceilings of 0.49-0.60 \cite{rustamov2025} shows why it is needed especially for a law application, but none of the systems can report when the output is inaccurate. Since models cannot self-evaluate \cite{dahl2024} an external gate is need.
+
+G4 --- Incomparable, non-standard evaluation. The applied systems use their own metrics and private query sets. None of them use common community-derived datasets like AILA or IL-TUR, and none apply RAGAS-style decomposition, making cross-system comparison unreliable.
+
+G5 --- Statutory cross-reference structure unexploited. Rustamov et al. address the problem but defer graphs to future work; Bindra et al. construct graphs over judgment citations but not statutory cross-references.
+
+\begin{table}[t]
+\caption{Mapping from Research Gaps to Proposed Contributions}
+\label{tab:gaps}
+\centering
+\footnotesize
+\begin{tabular}{@{}p{0.6cm}p{3.0cm}p{0.6cm}p{3.1cm}@{}}
+\toprule
+\textbf{Gap} & \textbf{Documented Absence} & \textbf{Ctr.} & \textbf{Proposed Response} \\
+\midrule
+G1 & No deterministic verification & C1 & Model-free citation verifier; precision $=1.0$ invariant \\
+\addlinespace
+G2 & Statutes or case law, never both; no recodification map & C2 & Unified corpus $+$ bidirectional IPC$\leftrightarrow$BNS mapping \\
+\addlinespace
+G3 & No abstention mechanism & C3 & External confidence gate with tuned threshold $\tau$ \\
+\addlinespace
+G4 & Bespoke, incomparable metrics & C4 & AILA/IL-TUR qrels $+$ RAGAS $+$ citation metrics \\
+\addlinespace
+G5 & Cross-references unexploited & C5 & Reference resolution at index time; citation graph \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Proposed System}
+
+\subsection{Corpus Construction}
+
+\subsubsection{Statutes} Central Acts are taken from Indian Kanoon in a hierarchical structure of Act $\rightarrow$ Section, with sub-sections resolved from the section text (India Code, the intended source, blocked automated access). Each node has the metadata: act name, section number, marginal note, repeal status, along with bidirectional mapping between old and new section mapping. The official correspondence tables list BNS/BNSS/BSA along with the replaced IPC/CrPC/IEA side by side, making them indispensable to C2.
+
+\subsubsection{Judgments} Supreme Court rulings are taken from Indian Kanoon, the source ILDC \cite{malik2021} was itself built from, with the case name, citations, bench, date, statues referred, and body text extracted. Segmenting the judgement into roles (facts, issues, reasoning, ruling) which is applied heuristically.
+
+\subsubsection{Normalisation} Citation strings are canonicalised to a single internal form --- ``Sec.\ 420 IPC'', ``s.420 of the Indian Penal Code'', and ``section 420, IPC'' all resolve to IPC\S420. This normalisation is necessary for the verifier: the citation generated by the LLM with the citation in the database.
+
+\subsubsection{Chunking} Chunking is done based on the legal structure of the documents. Statutes are chunked into having one section per chunk; with the chunk being the natural unit of citation --- the parent Act and Chapter title are attached to provide context and very long sections are scored over overlapping 150-word windows. Judgements are chunked paragraph by paragraph with parent-document retrieval: the paragraph is the retrieval unit. Surrounding context is also supplied to the generator. This approach avoids the arbitrary splitting caused by the recursive character splitting used in \cite{patil2025}, and follows the length-distribution-informed methodology of \cite{rustamov2025}.
+
+\subsection{Retrieval Architecture}
+
+At query time the system executes seven stages.
+
+Stage 1 --- Query understanding. In the present system this stage is minimal: the query passes to retrieval as written, and entity extraction and query rewriting \cite{patil2025} are left to future work.
+
+Stage 2 --- Hybrid retrieval. Stemmed BM25 and dense retrieval run in parallel and are merged by Reciprocal Rank Fusion. Two embedding models are compared --- InLegalBERT \cite{paul2023} as the domain-adapted arm and a general model (all-MiniLM-L6-v2) as the control.
+
+Stage 3 --- Cross-encoder reranking. The fused top-20 is reranked to top-5, each candidate scored by its best passage window; a repealed provision's recorded successor is then moved ahead of it.
+
+Stage 4 --- Confidence gate (C3). If the confidence score falls below a threshold $\tau$ tuned on a development split, the system abstains with an explicit insufficient-authority response rather than generating an output.
+
+Stage 5 --- Generation. A mid-size instruction-tuned model generates the output with a prompt that forbids outside knowledge, requiring citation markers inline with the output text and requiring verbatim text in quotation marks.
+
+Stage 6 --- Citation verification (C1). Described in Section~IV-C.
+
+Stage 7 --- Response assembly. The answer is verified and then returned with expandable source cards which shows the text from the corpus that supports the output. It shows a recodification notification as well for mapping between old and new sections. A disclaimer is also given that the system is a research and citation tool and not a substitute for legal advice.
+
+\subsection{The Deterministic Citation Verifier}
+
+The verifier is the paper's main contribution. It is model-free with no ML/LLM being using in the verifier; no inference and makes no probabilistic judgement, so it cannot hallucinate.
+
+Let $A$ be the generated answer, $R = \{r_1, \dots, r_k\}$ the set of retrieved chunks supplied to the generator, $M$ the metadata database, and $\theta = 0.95$ the quotation similarity threshold.
+
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} answer $A$, retrieved set $R$, metadata DB $M$
+\STATE \textbf{Output:} verified answer $A'$, verification report $V$
+\STATE $A' \leftarrow A$; $V \leftarrow \emptyset$
+\FOR{each citation marker $[n]$ in $A$}
+    \IF{$n$ does not index a chunk in $R$}
+        \STATE strip the associated claim from $A'$; log to $V$
+    \ENDIF
+\ENDFOR
+\FOR{each legal reference $c$ parsed from $A$}
+    \STATE $c \leftarrow \mathrm{normalise}(c)$
+    \IF{$c \notin M$ (a sub-section resolves to its section only if its labels occur in that section's text), or $c$ names an act not in $M$}
+        \STATE strip claim; log unresolved reference to $V$
+    \ELSE
+        \IF{$\mathrm{repealed}(c) \vee \mathrm{amended}(c)$}
+            \STATE annotate $A'$ with status and successor provision
+        \ENDIF
+    \ENDIF
+\ENDFOR
+\FOR{each quoted span $q$ in $A$}
+    \STATE $s \leftarrow \max_{r \in R} \mathrm{sim}(q, r)$
+    \IF{$s < \theta$ and $q$ is not a faithful elision of some $r \in R$}
+        \STATE strip or unquote $q$; log to $V$
+    \ENDIF
+\ENDFOR
+\RETURN $A'$, $V$
+\end{algorithmic}
+
+Three properties follow directly. First, citation precision on $A'$ is unity by construction, since any citation failing to resolve is removed before the answer is emitted. Second, the verifier is cheap: it performs string matching and database lookups, adding negligible latency compared to the 12.8\,s overhead reported for graph traversal and adversarial generation in \cite{bindra2026}. Third, it is auditable: the report $V$ records every intervention, so the system's failures are inspectable rather than opaque.
+
+The cost is coverage. Stripping unverifiable claims necessarily reduces answer completeness, and this trade-off must be measured rather than assumed --- hence our reporting of citation recall alongside precision, and of coverage alongside abstention accuracy.
+
+\subsection{Cross-Reference Resolution (C5)}
+
+Following \cite{rustamov2025}, references between statutes and sections (``punishment as provided in Section X'') are identified during indexing time and stored as links between sections, so that a section which depends on another section can retrieve information when required. As such a combined statute-judgement citation graph would support ``cases interpreting this section'' expansion and authority priority in reranking, following \cite{bindra2026}.
+
+\section{Datasets}
+
+There is not a single resource that unifies and covers statutes, case law and retrieval ground truth at the same time. As such, we implement a three-layer stack, summarized in Table~III.
+
+\begin{table}[t]
+\caption{Dataset Stack}
+\label{tab:data}
+\centering
+\footnotesize
+\begin{tabular}{@{}p{1.9cm}p{2.4cm}p{2.9cm}@{}}
+\toprule
+\textbf{Resource} & \textbf{Content} & \textbf{Role} \\
+\midrule
+Indian Kanoon (statutes) & 3,275 provisions of ten Central Acts, incl.\ BNS/BNSS/BSA and superseded codes & Statutory corpus \\
+\addlinespace
+UP Police correspondence tables & BNS$\leftrightarrow$IPC, BNSS$\leftrightarrow$CrPC, BSA$\leftrightarrow$IEA & Recodification mapping (C2) \\
+\addlinespace
+Indian Kanoon (judgments) & 110 SC judgments & Judgment corpus \\
+\addlinespace
+IL-TUR \cite{joshi2024} (planned) & LSI and PCR subsets & Retrieval ground truth (qrels) \\
+\addlinespace
+AILA \cite{bhattacharya2019} (planned) & $\approx$50 queries, $\approx$3{,}000 documents, official qrels & Community-comparable IR evaluation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Indian statutes and judgments are public domain under \S52(1)(q) of the Copyright Act, 1957. The terms of service and rate limits are followed while acquiring information and academic pre-packaged datasets are preferred to direct scraping of data. In practice India Code blocked automated access and the public ILDC mirror carried a text-corruption artefact, so both statutes and judgments were taken from Indian Kanoon.
+
+\section{Evaluation Methodology}
+
+The evaluation protocol is made in a way that each objective is measured based on a named metric on a name dataset. Table~IV shows the traceability.
+
+\begin{table}[t]
+\caption{Objective--Component--Metric Traceability}
+\label{tab:trace}
+\centering
+\footnotesize
+\begin{tabular}{@{}p{1.5cm}p{2.3cm}p{3.4cm}@{}}
+\toprule
+\textbf{Objective} & \textbf{Component} & \textbf{Metric / Dataset} \\
+\midrule
+O1 Faithful retrieval & Stages 2--3: hybrid $+$ RRF $+$ rerank & Recall@$\{5,10\}$, MRR, nDCG@10 on AILA, IL-TUR \\
+\addlinespace
+O2 Verified citation & Stage 6: verifier $+$ metadata DB & Citation precision and recall; pre/post-verifier hallucination rate \\
+\addlinespace
+O3 Calibrated abstention & Stage 4: confidence gate & Abstention accuracy; coverage--precision curve over $\tau$ \\
+\addlinespace
+O4 Evaluation rigour & Full ablation harness & RAGAS faithfulness, answer and context relevance \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Metric Families}
+
+Retrieval. Recall@$\{5, 10\}$, MRR, and nDCG@10 are calculated using AILA relevance judgements along with the IL-TUR statute-identification subset. Both MRR and nDCG are reported due to the reranking anomaly explored in \cite{rustamov2025}.
+
+Citation. Citation precision (the fraction of cited sources that support the claim) and citation recall (the fraction of the required citations that are recovered). Precision is expected to be unity after verification; while recall shows how much data is lost due to verification.
+
+Faithfulness. RAGAS \cite{es2023} faithfulness, answer relevance, and context precision are used to evaluate the system.
+
+Hallucination. The ratio of answers containing any non-existent or unsupported legal arguments is reported both before and after verification is applied.
+
+Abstention. Checking whether abstention takes place based on a deliberate set of unanswerable queries --- for example queries about state legislation that is not in the dataset. Coverage and precision trade-off is graphed based on $\tau$.
+
+Adversarial robustness. False-premise questions such as ``Under Section 999 IPC\ldots'', are used in the setup of \cite{dahl2024}, testing whether the system corrects or elaborates upon a false premise and generates a false answer.
+
+In the experiments of Section~VII, retrieval is measured on sixteen gold questions of our own; the AILA and IL-TUR runs and RAGAS scoring remain to be done.
+
+\subsection{Ablation Design}
+
+The ablation proceeds cumulatively: BM25-only $\rightarrow$ $+$dense $\rightarrow$ $+$RRF fusion $\rightarrow$ $+$cross-encoder rerank $\rightarrow$ $+$confidence gate $\rightarrow$ $+$citation verifier, with an ungrounded LLM as the baseline. The ungrounded configuration is expected to reproduce, in an Indian context, hallucinations documented for United States case law in \cite{dahl2024} and should have 1.8\% citation accuracy as seen in \cite{bindra2026}. The final increment isolates the contribution of C1.
+
+\section{Implementation and Results}
+
+The implementation is complete end to end. This section explains what has been built and been measured. Explicitly mentioning what those measurements establish and do not establish.
+
+\subsection{Scope of the Present Measurements}
+
+Components that are built and implemented to date are the citation normalizer, metadata store bundled with the recodification mapping, the deterministic verifier with all four checks, three repair rules, support screen with hallucination abstention, cross-reference resolver and the statutory citation graph, the BM25 and dense retrievers, Reciprocal Rank Fusion, the cross-encoder reranker, the confidence gate and the generator, wired into an end-to-end query system. The results in Sections~VII-B to VII-M are component-level or probe-level measurements; Sections~VII-N to VII-R report results on the real corpus and end to end.
+
+The results in Sections~VII-B to VII-M are computed on a corpus consisting of 35 provisions which cover ten central enactments and the Constitution. This hand selected corpus is chosen to test the pipeline before providing the full Indian Legal Code. The section text are paraphrased summaries rather than full statutory text, except for one provision which is verbatim so that the quotation check has actual text to match against. For these parameters two consequences follow: the quotation checker is disabled for the summarized sections, no measurements for these sections should be taken as a claim about legal accuracy. What the numbers measure is pipeline behavior: whether each component works as expected.
+
+\subsection{Citation Normalisation}
+
+The normaliser was evaluated on 48 different citation formats ranging from abbreviated forms to expanded act names, pre- and post-posed section words, sub-section and letter suffixes, the u/s shorthand, along with citations embedded in text. Eight negative strings were used which contained numbering but the text is not a citation to check for false positives. It resolves 48/48 positives (100\%) with 0/8 false positives.
+
+Two errors were found and fixed during this evaluation, both errors caused by the same root cause. It treated the ``o'' of ``of'' in ``Article 14 of the Constitution'' resulting in CONST\S14O instead of the correct CONST\S14 and read the ``C'' of ``Cr.P.C.''. A third error arose from a trailing word-boundary, failing after an abbreviation ending in a period. These issues are reported because they illustrate a general point: citation normalisation is not a solved regex processing problem. The verifier's guarantee is dependent on the strength and accuracy of the normaliser.
+
+\subsection{Verifier Fault Detection}
+
+The verifier was evaluated using 17 answers created specifically for testing with known truth labels. Of the 17 answers 4 are clean and 13 contain errors of a type the verifier is designed to catch: an unresolved citation, fake legal provisions, references to replaced laws. Results are shown in Table~V.
+
+\begin{table}[t]
+\caption{Verifier as a Fault Detector on Planted Faults (n$=$17)}
+\label{tab:verif}
+\centering
+\footnotesize
+\begin{tabular}{@{}lc@{}}
+\toprule
+\textbf{Quantity} & \textbf{Value} \\
+\midrule
+True positives / false positives & 13 / 0 \\
+True negatives / false negatives & 4 / 0 \\
+Detection precision & 1.000 \\
+Detection recall & 1.000 \\
+\addlinespace
+Mean coverage, clean answers & 1.000 \\
+Mean coverage, faulty answers & 0.436 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Perfect detection on these set of answers should be interpreted carefully. The answers were made to contain errors that were known to already be detected by the verifier, so the result confirms that the specific use of the verifier is implement correctly, not that the verifier catches every fault that it is not designed for. Its value is as a baseline and a demonstration to make sure the deterministic checks fire when needed with no false-positives. A verifier works that strips valid answers would destroy coverage.
+
+\subsection{Quotation Verification: A Negative Result}
+
+Quotation checking was implemented using a character-level fuzzy matching. However, it failed on a probe that changes a single word in an eighteen-word quote from Article 21, replacing ``procedure established by law'' with ``procedure established by statute''. The change inverts the meaning of the original quote but it still scores 98.1\% by character partial character ration and 95.9\% by full character ratio, passing the threshold in [0.80,0.98].
+
+The problem with character-level similarity checker is that it is not suited for verbatim quotation checking. This happens because a long prefix of text is correct, as such it dominates the scoring with a shorter alteration having less effect. Therefore, scoring based on a token level is used instead, the score calculated as longest continuous sequence of matching tokens divided by the total number of tokens. A single change in an n-token quotation then caps the score below (n-1)/n, which the threshold rejects. Table~VI reports the resulting threshold sweep.
+
+\begin{table}[t]
+\caption{Quotation Check: Threshold Sweep After Token-Level Scoring (n$=$5)}
+\label{tab:theta}
+\centering
+\footnotesize
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+$\theta$ & TP & FP & Precision & Recall \\
+\midrule
+0.80 & 2 & 0 & 1.00 & 0.67 \\
+0.90 & 2 & 0 & 1.00 & 0.67 \\
+\textbf{0.95} & \textbf{3} & \textbf{0} & \textbf{1.00} & \textbf{1.00} \\
+0.98 & 3 & 0 & 1.00 & 1.00 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This provides an empirical basis for $\theta = 0.95$, which had been an arbitrary constant; it is the lowest threshold in the sweep that reject a single-word substitution in a quotation. The near-miss case scores 94.4\% so threshold at or below 0.90 admit it.
+
+\subsection{Support Screening and Its Failure Boundary}
+
+As conceded in Section~IX -- the verifier checks whether the citation points to a valid section or not but it does not check whether the provision supports the query from the user. As an example, the sentence ``Murder is punishable under Section 138 of the NI Act [1]'' passes verification checks because the citation is valid, the provision exists and is enforced, and there is not quotation to verify. However, the claim itself is wrong, showing that a valid citation can still be irrelevant to the query.
+
+Checking whether a provision supports the query or not would require semantic analysis, which would mean the reintroduction of a model into the verification stage which would make the layer less reliable and more error prone. As such a simpler deterministic test is implemented where the vocabulary of the provision and query are checked for substantive overlap. If a provision supports a claim, then there should be a huge overlap between the claim and provision based on their vocabulary. The converse does not have to be true so the test works in one direction. Terms are weighted by inverse document frequency in the text so that legal vocabulary has less weightage and less used terms have more effect on weightage. Citation spans like section and section numbers are removed to not inflate result. Table~VII reports that this system works for clearly unrelated provisions and queries. However, if the incorrect provision is closely related to the query, then it struggles. For example, a murder claim can have similar vocabulary to both a murder punishment or an attempt provision. In such a case the scores overlap and the threshold cannot achieve both high precision and recall. The best attainable F1 on the adjacent et is 0.83, at a flagging precision of 0.71.
+
+\begin{table}[t]
+\caption{Support Screen: Score Separation by Probe Difficulty}
+\label{tab:support}
+\centering
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Probe set} & \textbf{Correct} & \textbf{Incorrect} & \textbf{Margin} \\
+                   & \textbf{(min)}   & \textbf{(max)}     & \\
+\midrule
+Unrelated subject matter (n$=$11) & 0.52 & 0.00 & $+0.52$ \\
+Topically adjacent (n$=$9)        & 0.24 & 0.33 & $\mathbf{-0.09}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This is the limits of a vocabulary-based system rather than an implementation error since related provisions use similar words, while the actual difference is in what the provision does with the subject matter. A word-overlap method cannot handle this.
+
+The consequence of this is that V5 should not strip claims. If the threshold is too aggressive, not only will more citation errors be caught, it will also start removing claims that are correct. Aggressive stripping reduces coverage and goes against the verifier as well. As such, V5 is used as an advisory checker at $\tau_s = 0.20$. The precision for flagging remains 1.000 at $\tau_s \in [0.025, 0.225]$. Recall plateaus at a maximum value of 0.818 from $\tau_s = 0.150$ and upward. As such we take $\tau_s = 0.20$ as the point where maximum recall is given while still staying below the lowest score of a correct claim in an adjacent set, which is 0.24. If the threshold is beyond that point, the precision starts to decrease. When tested end to end using the verifier on 20 claims, V5 detects 9 of 11 incorrect citations, giving a recall of 0.818. None of the correct claims were flagged giving 1.000 precision and zero false positives. Two adjacent citations were missed however.
+
+A new problem was detected during implementation worth exploring. V5 only looked for candidate provision from textual citations. Meaning that claims connected to a provision through a marker, such as [1], were not checked. The test therefore did not flag any citations from probes because V5 never screened those claims. This issue was fixed by collecting candidate provisions from textual citations and marker-to-chunk resolutions.
+
+\subsection{Evidence-Bounded Repair}
+
+The main problem with the base verifier is that its precision is obtained by deleting more than half of the generated answer, inviting the objection that the base verifier is a censoring mechanism rather than verification. As such, we implemented the two repair rules presented in Section~IV and compared them with the strip=only baseline using a set of 27 answers. Table~VIII reports the result.
+
+\begin{table}[t]
+\caption{Repair Ablation (n$=$27 probe answers)}
+\label{tab:repair}
+\centering
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Mode} & \textbf{Coverage} & \textbf{Coverage} & \textbf{Audit} \\
+              & \textbf{(all)}    & \textbf{(faulty)} & \textbf{pass} \\
+\midrule
+Strip-only      & 0.451 & 0.294 & 27/27 \\
+Strip $+$ repair & \textbf{0.580} & \textbf{0.460} & \textbf{27/27} \\
+\addlinespace
+Gain & $+0.130$ & $+0.167$ & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+16.7 percentage points of coverage are recovered on faulty answer without any new violations being introduced by the repair rules. The audit column is calculated by a post-hoc check over the final output, which re-checks the surviving mark and references again instead of solely relying on the verifier's result. Both modes pass over all 27 answers, so there is no coverage gain from relaxing a check.
+
+Across the set answers nine repair mechanism were fired. The rules decline to repair cases where there is no satisfactory evidence: sentences with markers pointing to no provisions (r1-neg) is stripped, since there nothing to repoint to the marker. All hallucinated provisions and quotations are unrepaired -- repairing hallucinations requires fabricating text which the system is designed to prevent.
+
+Two errors were found during the evaluation. First error, the set of initial answers had no case that could trigger R1: every unresolved-marker probe named no retrievable provision, so R1 never fired and measured coverage gain was zero. The answers were made to test verifier detection, not to test repair behaviour. Second, R2 produced output which was grammatically inaccurate for example, ``is punishable Section 318 BNS'', because the matched citation text has a leading connective which was stripped during the rewrite. These issues show that test sets built for a specific scenario can miss important cases that the author did not prepare for.
+
+\subsection{Cross-Reference Resolution}
+
+The cross-reference resolver finds 7 edges over the development corpus, all them made intra-Act references which could be resolved in the same Act containing them. A heuristic function separated five deliberately non-self-contained provisions (scores 0.86-1.00) from the remaining thirty (all scored 0.00) provisions whose meaning lies elsewhere, identifiable at index time.
+
+Impact on retrieval is less clear and is reported as follows. For five queries whose gold answer is non-self-contained in a provision, expanding through a graph increased Recall@1 from 0.800 to 1.000 (+0.200), while increasing candidate-set cost from 1.0 to 1.2 documents, yielding no gains at $K \geq 2$. Recall on the sixteen ordinary queries stayed the same, so there was no degradation from expansion.
+
+This is not treated as a strong result, since the corpus has only 35 provisions, and at $K = 10$ the system retrieves 29\% of the corpus, making results above $K = 1$ uninformative. Our synthetic non-self-contained provisions contain small descriptive notes (``Attempting to commit offences''), which leak a signal BM25 can pick up. Real instances described by Rustamov et al. are difficult because no lexical signal is leaked. So, the mechanism is shown to work but its retrieval effect is untested against a realistic corpus; on the real corpus the graph holds 1,936 edges and marks 246 provisions as largely dependent on others.
+
+\subsection{Parser Evasion: Twelve Defects in the Guarantee}
+
+The checks in Section~IV are only used on the citations that are extracted by the parser. Citations that are not extracted are not checked and no flag is raised meaning that the guarantee cannot be maintained while the system still says it is successful. This makes the parser the weakest link in the architecture, so it was tested adversarially. There were three defects found, which were already present during the measurements above. A second test was conducted after adding the regression harness, finding six more error. Both tests are reported since it shows that only one adversarial pass over the parser is insufficient.
+
+D1: sentence segmentation. Splitting sentence based on period punctuation can destroy legal text, since it many legal abbreviations end in a period. ``The accused was charged under Sec.\ 420 IPC. He pleaded not guilty'' would be segmented into three parts. The citation would be fragmented from the claim, ``420 IPC'' would be isolated and no longer parsed as a citation, so V2 was never run over it. To prevent this, abbreviation periods are now hidden before segmentation and restored afterwards, based on a dictionary of common abbreviations in Indian legal text.
+
+D2: enumerated references. The parser cannot extract citations from references in the form ``sections 302 and 304 of the IPC'', because the trailing act is separated from the first number by the ``and'' so it does not match any pattern. As such if a fabricated section was put inside an enumerated reference, it would not be extracted and checked providing a gap in the guarantee. This can be exploited by a generator that happens to enumerate. To fix this the parser now fragments these references into individual citations. Numeric ranges are split when the range is small and the ending character is integer like ``302 to 305''. Lettered ranges like 66A to 66F are not split fully since that could lead to hallucination.
+
+D3: unterminated quotations. Quotation checker needs a closing quotation mark. So hallucinated quotations missing a closing mark was not matched to any provision and skipped by V4. The parser now treats a closing quote and of end of text as the end of the quotation. The second test was then designed to test the patterns further to see what generator productions could break it, finding six more defects.
+
+D4: act-first enumerations. ``BNS sections 318 and 7777'' and ``BNS 318/7777'' where the act is before the enumeration which is the opposite of D2. The parser only took the act and the first number missing 7777.
+
+D5: separator coverage. The parser could not recognize the different ways of separating citations like slash, semicolon and ``r/w'' conjunction (read with). So fabricated citations could be hidden when joined with these hidden connectors.
+
+D6: inline markup. Markdown formatting was hiding the section number from the parser. For example, ``Section **7777** BNS'' was not recognized due to the pattern being interrupted.
+
+D7: invisible characters. Hidden characters like zero-width spaces or backtick code span can break the parser despite appearing to be a normal citation. For example, ``7777 BNS'' looks normal, but it breaks the pattern. Hallucinated sections can be hidden from the verifier by using invisible characters.
+
+D8: interposed footnote markers. Footnote markers between the section number and name broke the pattern. ``Section 7777[2] BNS'' was not recognized.
+
+D9: parenthesized numbers. ``Section (7777) BNS'' matched nothing.
+
+D6 and D7 can be fixed by a sanitizing pass that removes irrelevant characts before matching. The pass replaces the characters with a simple space, since the offsets from the spaces in the citation are repaired using R2 to rewrite the citation with the support screen used to remove citation text before scoring. If sanitization deleted characters, it would produce offsets and shift positions which could damage the output. Remaining errors are repaired by patterns. One observation worth recording is: while fixing D4, the same greedy letter-suffix root cause as the two normalization defects of Section~VII-B, reducing ``103, 105 and 7777'' to ``103, 105''. It was caught because the number of citations extracted was counted instead of verifying the final verdict.
+
+Three further defects were found later, not by probing but in answers produced by a live model. D10: a list that repeats the section symbol for each item (``the Bharatiya Nyaya Sanhita \S80, \S118'') collapsed to its first member. D11: a hyphenated suffix (``Section 65-B'') was cut to ``65'', which is a real but unrelated provision on the full corpus, so the wrong citation validated instead of going unchecked. D12: an act name followed by a parenthesised section (``the Indian Penal Code (Section 500)'') extracted nothing.
+
+Table~IX reports the results of tests for the parser bugs that was on conducted on a probe set built specifically for it. Twenty-one false citations were planted in the probe and all of them were caught. Eight of the probes were valid but were created in irregular syntax and none were falsely flagged. When the old parser was used, ten of the twelve cases in the second audit were missed. This confirmed that the tests were being used to check the repairs instead of restating it.
+
+\begin{table}[t]
+\caption{Parser-Evasion Resistance After Repair (n$=$29)}
+\label{tab:evasion}
+\centering
+\footnotesize
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Evasion construct} & \textbf{Concealed} & \textbf{Detected} \\
+\midrule
+Fabricated section in enumeration      & 3 & 3 \\
+Fabricated section across abbreviation & 2 & 2 \\
+Unterminated fabricated quotation      & 1 & 1 \\
+Superseded provisions in enumeration   & 1 & 1 \\
+\addlinespace
+Act-first enumeration (D4)             & 3 & 3 \\
+Alternative separator (D5)             & 3 & 3 \\
+Inline markup (D6)                     & 3 & 3 \\
+Invisible character (D7)               & 1 & 1 \\
+Interposed footnote marker (D8)        & 1 & 1 \\
+Parenthesised number (D9)              & 1 & 1 \\
+\addlinespace
+Repeated section symbol (D10)          & 1 & 1 \\
+Act name, parenthesised section (D12)  & 1 & 1 \\
+\addlinespace
+Valid controls (same syntactic forms)  & 0 & 0 \\
+\midrule
+\textbf{Precision / recall} & \multicolumn{2}{c}{\textbf{1.000 / 1.000}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The testing methodology is more important than the fix. Re-running the previous experiments that were run before the parser was fixed showed that none of the old numbers changed: normalizer accuracy, verifier detection, coverage and repair gain. The probe set by coincidence had avoided every construct that was broken. Therefore, designing tests alongside components can accidently avoid edge-case failures of a component. Stable scores after a correctness-changing edit means that the test were insufficiently adversarial.
+
+\subsection{Minimum Evidence Abstention in the Support Screen}
+
+Testing of V5 exposed another failure in it. V5 checks whether a claim and the cited provision share structure and vocabulary. But procedural claims like ``Charges were framed under sections 318 and 103 of the BNS'' -- does not maintain much subject-matter vocabulary after removing structural words like ``sections'', ``BNS'' leaving no vocabulary. As such the support score for such statements becomes zero and a valid claim is falsely flagged. Both valid claims were flagged, despite V5 having measured a precision of 1.000 on the probes designed for it.
+
+V5 now abstains if a claim has fewer than three substantive terms instead of guessing. List of structural words to be stripped was also expanded to include auxiliaries and claim-framing verbs (``provides'', ``applies'', ``charged''), because they describe the phrasing of a claim instead of its actual legal content. After both changes V5 maintains flagging precision of 1.000 and recall 0.818 for its probe set while flagging none of the control. The important point is that the earlier precision of 1.000 appeared stronger than it was as the probe set was authored for the component itself. Testing cases outside of the components scope gives stronger evidence.
+
+\subsection{Support via Cross-Reference: A Predicted Fix That Had to Be Rebuilt}
+
+The support screen of Section~VII-E and the citation graph of Section~VII-G were built separately, leaving behind a structural gap. Certain provisions only contain references to other sections and provisions and do not provide legal context directly themselves. For example, ``cognizance of any offence punishable under section 138'' -- contains almost no topical vocabulary itself. As such a claim about the offence can be cited to this provision but V5 does not see any matching vocabulary leading it to false flag this provision as unsupported. The graph module is aware of the connection between the section and Section 138 but V5 was not using that information.
+
+The effect of the defect was larger than expected. On a probe set of valid or invalid non-self-contained provisions in the corpus, V5 falsely flagged all valid probes of count five. Due to this, flagging precision became 0.500 as compared to the 1.000 measured with the earlier authored tests. This again illustrates the dangers of testing purely component-designed probes, which provide a more optimistic output, which is stated in Section~VII-I.
+
+The obvious solution is supressing the flag for a one-hop outbound reference that supports a claim, but this reduces flagging precisions because the same reference that provides a correct citation can also provide an adjacent citation which is wrong. A claim about police arrests may also wrongly cite to post-arrest procedure, which is rescued by through that section's reference to arrest powers. The graph would see that connection between these citations and treat it as supported, as such the graph says which provisions are connected but not which citation is actually relevant.
+
+Therefore, we do not automatically supress the flags set by the screen. Instead, a third advisory result is added which annotates the cited provision labelling them based on whether they support the claim or not. Nothing is silently passed and nothing is falsely mislabelled; the verdicts are advisory and does not strip any of the citations, preserving invariant 4. The results are presented by Table~X. Three of the five false flags are removed and flagging precisions remains unaffected at 1.000. Recall cost is one probe, moving from the flag category into weaker annotation rather than out of the report altogether.
+
+\begin{table}[t]
+\caption{Support Screening With and Without the Citation Graph}
+\label{tab:xrefsupport}
+\centering
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Probe set / configuration} & \textbf{Prec.} & \textbf{Recall} & \textbf{False} \\
+                                   &                &                 & \textbf{alarms} \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Non-self-contained provisions} (n$=$11)} \\
+\quad V5 alone            & 0.500 & 0.833 & 5 \\
+\quad V5 $+$ graph        & \textbf{0.667} & 0.667 & \textbf{2} \\
+\addlinespace
+\multicolumn{4}{@{}l}{\emph{Sets V5 was tuned against} (n$=$20)} \\
+\quad V5 alone            & 1.000 & 0.818 & 0 \\
+\quad V5 $+$ graph        & \textbf{1.000} & 0.727 & \textbf{0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two of the five correct citations could not be recovered, since the provisions they referenced were paraphrased or summarized and as such lacked distinct and matching vocabulary with the claim to match the threshold even if it is only one-hop away.
+
+\subsection{Retrieval Baseline and a Recodification Diagnostic}
+
+BM25 over the development corpus gets Recall@1 $= 1.000$ and MRR@10 $= 1.000$ on 16 gold questions. We report this for completeness, not as a real finding: with 35 provisions whose marginal notes are lexically distinctive, retrieval is trivial here. It just shows the pipeline runs end to end, nothing more; on the full corpus these numbers drop to 0.375, below the 0.49--0.60 range reported for similar statutory collections \cite{rustamov2025} (Section~VII-N).
+
+A more useful diagnostic is the recodification case. When a query's answer exists in both a repealed provision and its successor, the two share a near-identical marginal note by construction --- ``Punishment for murder'' heads both IPC \S302 and BNS \S103. A purely lexical retriever has no way to tell current law from superseded law here. Over the nine gold questions with such a pair, BM25 ranks the in-force provision above its repealed predecessor in only 3 of 9 cases (33.3\%) --- worse than chance. In the worst case the in-force provision falls to rank 23 while its repealed twin comes back first.
+
+Running the verifier's mapping layer on the same nine cases, every citation to a superseded provision gets caught and annotated with its successor: 9/9 (100\%). So the user is told which provision actually governs regardless of how retrieval ranked things. This is the clearest evidence so far for treating recodification handling as a real contribution rather than a side feature: the failure is real, it doesn't show up in standard retrieval metrics, and it gets fixed at the verification layer and, on the real corpus, at retrieval as well (Section~VII-N).
+
+One caveat: the IPC$\leftrightarrow$BNS correspondences in the development corpus were entered by hand and are flagged in the database as pending verification against the official India Code correspondence tables; the verifier surfaces that provisional status in its annotations. The 100\% figure shows the mapping mechanism works, not that the mappings themselves are legally correct. In the real corpus the mapping is built from official correspondence tables and every entry is verified (Section~VII-N).
+
+\subsection{Calibrated Abstention (C3)}
+
+Verification says nothing when a query's answer isn't in the corpus at all. The retriever still returns its top-k, a generator still writes over them, and every citation in the result can verify perfectly while the answer is worthless --- nothing in the emitted text is malformed, so nothing trips a check. The confidence gate handles this by declining to answer instead.
+
+This needs to be labeled correctly: the gate is a threshold on a retrieval score, tuned on held-out data --- a statistical decision, and so a weaker guarantee than the verification layer gives. That's why it lives in the retrieval package rather than the verification package. It can fail in both directions: refusing an answerable query costs coverage, and answering an unanswerable one costs exactly what the gate exists to prevent. A raw BM25 score isn't comparable across queries, because it scales with how many substantive terms the query has and how rare they are. So we normalize by the inverse document frequency the query puts on the table
+\[
+\mathrm{conf}(q) \;=\; \frac{\mathrm{bm25}_{\text{top-1}}(q)}{\sum_{t \in q} \mathrm{idf}(t)},
+\]
+which asks what fraction of the evidence the query demanded was actually found. A term missing from the corpus contributes maximum demand and zero score --- which is what pushes an out-of-corpus query's score down rather than up.
+
+Sixteen deliberately unanswerable queries were written --- real questions of Indian law on tax, intellectual property, family law, company law, labour law, and limitation, none of which the development corpus covers --- and made hard on purpose by sharing vocabulary like ``property,'' ``bail,'' ``penalty,'' and ``records'' with provisions that are in the corpus. Answerable and unanswerable queries were each split in half; every threshold is tuned on the dev half and reported on the held-out half.
+
+Table~XI shows the result, and the ordering matters. If we'd picked the signal by dev-set performance, we'd have chosen raw BM25 top-1, which separates the two classes perfectly on dev and then makes two errors on test. The normalized signal looks worse on dev --- its classes overlap a bit there --- and makes zero errors on test.
+
+\begin{table}[t]
+\caption{Confidence Signals: Tuned on Dev, Reported on Held-Out Test (development corpus)}
+\label{tab:confidence}
+\centering
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Signal} & \textbf{Dev} & \textbf{Test} & \textbf{Test} \\
+                & \textbf{bal. acc.} & \textbf{bal. acc.} & \textbf{errors} \\
+\midrule
+Raw BM25 top-1            & \textbf{1.000} & 0.875 & 2 \\
+Top-1 minus top-2 margin  & 0.938 & 0.688 & 5 \\
+IDF-normalised (deployed) & 0.938 & \textbf{1.000} & \textbf{0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We deploy the normalized signal because of the comparability argument made above, not because of this comparison --- that's the right order of reasoning: with eight queries per class per split, a two-query difference is illustrative, not statistically significant. We report the comparison anyway because picking the signal that wins on the dev split is exactly the methodological mistake this paper accuses the surveyed literature of making, and the same trap is sitting right here too.
+
+At the chosen threshold $\tau_c = 0.305$ --- the midpoint of the dev-optimal interval rather than its edge, since an edge threshold sits right on an observed score --- the gate answers all eight held-out answerable queries and abstains on all eight held-out unanswerable ones. On the dev half it answers one unanswerable query, which we're reporting rather than quietly retuning away.
+
+Two limits worth stating plainly. The corpus is 35 provisions and its retrieval benchmark is saturated, so this measures whether the calibration procedure is sound, not how well the gate performs in general; Section~VII-P recalibrates it on the real corpus. And we wrote the unanswerable queries ourselves, so they only test the gate against out-of-corpus questions we thought to ask; Section~VII-P adds eight that we did not write. The genuinely hard case --- a question whose answer is partially in the corpus, where neither a confident answer nor a refusal is correct --- isn't represented here at all, and is the obvious next thing to build a probe set for.
+
+\subsection{The Evaluation Harness as a Failure Surface}
+
+Until recently, every result above was guarded only by a regression check of the form \texttt{python3 eval/run\_X.py >/dev/null \&\& echo PASS}. That check only confirms the script didn't crash. It says nothing about the actual numbers the script computes --- a script that silently reports 0.00 for every metric would still print PASS. So the harness was checking well-formedness, not correctness --- exactly the distinction this paper argues separates a statistical control from a guarantee, and it showed up inside our own tooling too.
+
+We converted the evaluation scripts so each one returns its metrics as structured values while still printing the same human-readable table as before; the tables in this section and the assertions come from the same function call, so they can't drift apart. Ninety-one assertions encoded explicit numeric thresholds for every figure reported above at the time (the suite now holds 282 tests), plus the architectural invariants from Section~IV, checked directly rather than through a metric: that no module under verify/ imports an inference, learned-similarity, or network library (checked by walking the import graph); that verification is deterministic across independently built instances; that no emitted answer contains an unresolvable marker or a nonexistent provision under any of the four repair $\times$ support configurations; that V1, V2, and V4 strip rather than annotate; and that V3 and V5 annotate without ever stripping.
+
+A test suite that's never failed hasn't really been validated, so we checked the harness by mutation: seven defects were injected one at a time, each corresponding to a claim the paper makes. Table~XII shows the result --- all seven are caught by the new assertions and none by the old check. The first row is the starkest: with V2's stripping disabled --- so fabricated provisions survive into the emitted output, which would void the paper's central claim --- all eleven evaluation scripts still exit zero and the old check reports PASS for every one, while the new suite fails six assertions, including the independent post-hoc audit.
+
+\begin{table}[t]
+\caption{Mutation Validation of the Regression Harness}
+\label{tab:mutation}
+\centering
+\footnotesize
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Injected defect} & \textbf{Old} & \textbf{New} \\
+                         & \textbf{check} & \textbf{check} \\
+\midrule
+V2 made annotate-only (fabrications survive) & pass & \textbf{6 fail} \\
+V5 made to strip (invariant violated)        & pass & \textbf{2 fail} \\
+Network library imported under \texttt{verify/} & pass & \textbf{1 fail} \\
+$\theta$ relaxed to character-era 0.90       & pass & \textbf{1 fail} \\
+Repair rule R1 disabled                      & pass & \textbf{2 fail} \\
+V1 marker check removed                      & pass & \textbf{8 fail} \\
+Abbreviation masking disabled (defect D1)    & pass & \textbf{1 fail} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Converting the harness also turned up drift between the paper and the code. Three published figures were stale, and in each case for the same reason: a change reported in one subsection had altered a measurement reported elsewhere, with nothing linking the two. The development corpus had grown from 30 to 35 provisions --- stated correctly in Section~VII-G but wrong in three other places; the worst-case in-force rank in the recodification diagnostic had moved from 18 to 23 along with that growth; and the easy-set separation margin of the support screen had improved from +0.42 to +0.52 because the structural-vocabulary extension in Section~VII-I raised the lowest-scoring correct claim --- a consequence that never got re-derived in Section~VII-E or the abstract. All three are fixed above. None of them changes a conclusion --- the adjacent-set margin of $-0.09$, which carries the negative result, is untouched by all three --- but the mechanism that produced them wouldn't have stopped at harmless numbers on its own. So a further set of assertions closes the loop between the two artefacts directly: each takes a figure from the harness, formats it the way this paper writes it, and checks it appears in the paper's source. A measurement that changes now fails the suite until the text is updated in the same edit.
+
+We should flag the limits of this exercise too. Mutation coverage shows the assertions catch the defects we thought to inject --- the same circularity the probe sets have, described in Section~VII-H. It's evidence the harness isn't vacuous, not that it's complete.
+
+\subsection{The Real Corpus and Retrieval at Scale}
+
+For every end-to-end measurement the development corpus was replaced by a real corpus of 3,275 provisions covering all ten target Acts (IPC, BNS, CrPC, BNSS, IEA, BSA, the NI Act, the IT Act, the Contract Act and the Constitution), every one verbatim. India Code refused automated requests on every content path we tried, so the text was taken from Indian Kanoon, which marks up all ten Acts in the same Akoma Ntoso structure.
+
+Scraping needed the same adversarial care as the parser. Among the defects found and fixed: state and union-territory amendment tables sat inside central sections and were being read as national law (the corpus's IEA \S90A was in fact Uttar Pradesh's \S90-A); twelve inserted Evidence Act sections, among them \S113-B, had been merged into their parents, so a correct citation to \S113-B was stripped as non-existent; and sections whose whole text sat in the heading were silently dropped. Each has a regression test.
+
+The recodification mapping was rebuilt from the official correspondence tables published by the Uttar Pradesh Police for all three pairs of codes: 1,086 section-level pairs, each marked verified because it comes from the table, which leaves 1,084 of the 1,264 repealed provisions with a recorded successor. The eleven pairs tracked by hand in the development corpus are all confirmed by the tables.
+
+Table~XIII reports retrieval on the sixteen gold questions. Plain BM25 falls from the saturated 1.000 to 0.375 Recall@1, below the 0.49--0.60 range of \cite{rustamov2025}; Snowball stemming lifts it to 0.500. InLegalBERT stays behind the general encoder, as it was never tuned for retrieval. Because 21\% of provisions exceed the 256-token encoder limit, both encoders are applied to overlapping 150-word windows and a provision is scored by its best window, which helps both. Fusion beats both single arms.
+
+\begin{table}[t]
+\caption{Retrieval on the Real Corpus (3,275 provisions, 16 gold questions)}
+\label{tab:realret}
+\centering
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Arm} & \textbf{R@1} & \textbf{R@10} & \textbf{MRR@10} \\
+\midrule
+BM25                            & 0.375 & 0.812 & 0.518 \\
+BM25, stemmed                   & 0.500 & 0.812 & 0.604 \\
+InLegalBERT, whole provision    & 0.250 & 0.375 & 0.278 \\
+InLegalBERT, passage windows    & 0.312 & 0.438 & 0.346 \\
+MiniLM, whole provision         & 0.438 & 0.875 & 0.568 \\
+MiniLM, passage windows         & 0.562 & 0.875 & 0.638 \\
+\addlinespace
+RRF (stemmed BM25 $+$ MiniLM)   & \textbf{0.562} & \textbf{1.000} & \textbf{0.690} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Reranking shows the anomaly of \cite{rustamov2025} in a new form (Table~XIV). Scored over whole provisions, which the cross-encoder truncates at 512 tokens, reranking lowers MRR@10 on the fused top-20 from 0.676 to 0.626. Scored over the same passage windows, it raises it to 0.821, with Recall@1 of 0.750.
+
+\begin{table}[t]
+\caption{Reranking the Fused Top-20 (real corpus)}
+\label{tab:realrerank}
+\centering
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Stage} & \textbf{MRR@10} & \textbf{nDCG@10} & \textbf{R@1} \\
+\midrule
+RRF fusion                       & 0.676 & 0.684 & 0.562 \\
+$+$ rerank, whole provision      & 0.626 & 0.650 & 0.500 \\
+$+$ rerank, passage windows      & \textbf{0.821} & 0.786 & \textbf{0.750} \\
+$+$ in-force preference          & \textbf{0.821} & \textbf{0.812} & \textbf{0.750} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The recodification diagnostic of Section~VII-K was repeated on this corpus. BM25 ranks the in-force provision above its repealed predecessor in 4 of 9 pairs. Moving a repealed provision's recorded successor directly ahead of it --- a reordering that adds nothing retrieval did not find --- raises this to 8 of 9, and the verifier annotates all 9 repealed citations with their successor.
+
+\subsection{The Verifier on Real Text}
+
+The probe sets of Sections~VII-C to VII-J run on the development corpus, which contains no sub-section pinpoints, act names outside the corpus, enactment years or elided quotations. We built a second probe set on the real corpus in matched pairs: for each construct, a fault the verifier must strip and a correct use of the same construct it must keep. Several constructs were taken from the live answers of Section~VII-Q rather than invented.
+
+Run against the earlier code, the verifier stripped 12 of 17 faults and wrongly stripped 6 of 14 correct citations (Table~XV). Five defects explain the difference. A correct pinpoint such as ``Article 19(1)(a)'' was stripped as non-existent because the corpus stores whole sections; it now resolves to its section only when the cited labels occur, as labels rather than as cross-references, in that section's text, so ``Article 19(2)(a)'', which the text only mentions, still fails. A section cited to an act the corpus does not hold, such as ``Section 5 of the Indian Cyber Safety Act, 2019'', produced no citation at all and passed; it is now extracted and stripped. ``IPC 1860'' was read as section 1860. A marker written after the full stop was split off as its own sentence, leaving the claim uncited. And every quotation that marked an omission with an ellipsis failed V4, even when each word was verbatim.
+
+The last fix needed the most care, since an ellipsis can remove the one word that carries a provision's effect: ``shall \ldots\ be deprived'' from ``shall not be deprived''. An elided quotation is accepted only when every segment appears verbatim and in order in one retrieved chunk, no omitted span is longer than 40 tokens, and no omitted span contains a negation, exception, condition or alternative (``not'', ``except'', ``unless'', ``provided'', ``or'' and similar). When the first version of these fixes passed its own probes, we attacked it and found five more gaps --- a lower-case invented act, invented acts called a ``Law'' or ``Bill'', a sub-clause that exists only as a cross-reference, and a year-shaped invented section --- and closed them. A third repair rule, R3, repoints a marker that names a different retrieved provision from the one the sentence cites; where the cited provision was not retrieved, the mismatch is flagged instead.
+
+\begin{table}[t]
+\caption{Verifier on Real-Corpus Probes (matched fault/correct pairs)}
+\label{tab:realverif}
+\centering
+\footnotesize
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Quantity} & \textbf{Earlier code} & \textbf{Final} \\
+\midrule
+Faults stripped               & 12/17 & \textbf{17/17} \\
+Correct citations kept        & 8/14  & \textbf{14/14} \\
+Marker mismatches handled     & 1/3   & \textbf{3/3} \\
+Independent audit of output   & ---   & \textbf{31/31} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Calibrated Abstention on the Real Corpus}
+
+The development-corpus threshold $\tau_c = 0.305$ does not transfer: applied to the real corpus it answers out-of-scope questions such as ``How is agricultural income taxed?''. The gate was recalibrated on the same dev/test split (Table~XVI). The normalised signal again generalises best, at $\tau_r = 1.077$: on the held-out half it answers 7 of 8 answerable questions and refuses all 8 unanswerable ones (balanced accuracy 0.938), while raw BM25 top-1 falls to 0.688. Stemming, which helps retrieval, hurts the gate: it raises the lexical overlap of out-of-scope questions too, and held-out correct abstention drops from 1.000 to 0.625, so the gate keeps unstemmed BM25. On eight unanswerable questions taken verbatim from a public legal question-and-answer site, which we did not write, the gate abstains on six (0.750).
+
+\begin{table}[t]
+\caption{Confidence Signals on the Real Corpus: Tuned on Dev, Reported on Held-Out Test}
+\label{tab:realconf}
+\centering
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Signal} & \textbf{Dev} & \textbf{Test} & \textbf{Test} \\
+                & \textbf{bal. acc.} & \textbf{bal. acc.} & \textbf{errors} \\
+\midrule
+Raw BM25 top-1            & 0.688 & 0.688 & 5 \\
+Top-1 minus top-2 margin  & 0.688 & 0.438 & 9 \\
+IDF-normalised (deployed) & 0.688 & \textbf{0.938} & \textbf{1} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{End-to-End Generation}
+
+The full pipeline was first run with answers composed by the same model that assisted in building this project, which cannot count as independent. Across sixteen ungrounded and sixteen grounded answers, citation resolution was 1.000 before and after verification, repair rewrote the superseded citations in nine ungrounded answers, and V4 removed unsupported quotations from two grounded answers (mean coverage 0.948).
+
+We then ran it against an independently invoked model, gpt-oss-20b through the Groq API, which had no view of the project's code, over the same sixteen gold questions and sixteen unanswerable ones (Table~XVII). The gate passed ten gold questions and none of the unanswerable ones. Across the ten answers the model wrote 29 citations. One did not resolve --- a real section attributed to the ``Bharatiya Samvidhan Adhiniyam'', an act that does not exist --- and it was removed, taking citation resolution from 0.966 to 1.000. Of eight quotations that did not match their source as one contiguous run, five were faithful elisions and were kept; three were removed: one genuine misquotation and two elisions that dropped a legal exception, such as ``in the absence of a special order of a Magistrate under section 167'' from CrPC \S57. Of all sentences, 97.2\% survived, and verification took a median of 1.9\,ms per answer. The query set is still our own, so these figures describe the mechanism on real output, not hallucination rates in general.
+
+\begin{table}[t]
+\caption{Independently Generated Answers (gpt-oss-20b), Before and After Verification}
+\label{tab:live}
+\centering
+\footnotesize
+\begin{tabular}{@{}lc@{}}
+\toprule
+\textbf{Quantity} & \textbf{Value} \\
+\midrule
+Gold questions answered / unanswerable answered & 10/16 / 0/16 \\
+Citation resolution, pre-verifier  & 0.966 (28/29) \\
+Citation resolution, post-verifier & \textbf{1.000 (28/28)} \\
+Quotations removed / elisions kept & 3 / 5 \\
+Repealed citations annotated with successor & 4 \\
+Mean sentence coverage & 0.972 \\
+Verifier latency, median per answer & 1.9\,ms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{The Judgment Corpus}
+
+Case law was added as a separate corpus of 110 Supreme Court judgments across several years and subjects, parsed into paragraphs with their case name, date, bench and statutes referred. The public ILDC mirror was not used: its text carries a systematic corruption (``connected'' appears as ``companynected'') and no metadata. Parsing turned up defects of its own --- quoted precedent in blockquotes, 8,187 of them across 95\% of judgments, was being dropped, and hidden e-filing signature text was being spliced into sentences --- and both were fixed. On twenty queries built from single paragraphs, paragraph-level parent-document retrieval and fixed four-paragraph windows are nearly tied (Recall@1 0.900 for both; MRR@10 0.925 and 0.942), which is a weak test, since each query is drawn from its target paragraph's own words. The judgment corpus is not yet connected to the verifier.
+
+\section{Discussion and Comparison with Prior Systems}
+
+The expectations below were written before the remaining components were built; each is now checked against the measurements in Section~VII.
+
+Given the converging findings in Section~II, we expected hybrid retrieval to beat both single-arm setups, in line with \cite{bolla2026}, \cite{rustamov2025}, \cite{sun2025}, and it does (MRR@10 0.690 against 0.604 and 0.638). We expected absolute recall to sit well below 1.0 --- the 0.49--0.60 range reported for structurally similar statutory corpora \cite{rustamov2025} is a realistic reference point --- which is exactly the empirical justification for the abstention gate, not an argument against the system. Plain BM25 lands below that range at 0.375; the full stack reaches 0.750.
+
+The more distinctive expectation is about citation precision. Because the verifier removes any claim whose citation doesn't resolve, post-verifier citation precision is 1.0 by construction, not by measurement. The interesting quantities are the pre-verifier hallucination rate, which shows how much work the verifier is actually doing, and citation recall, which shows what the guarantee costs in coverage. A system that hits precision 1.0 by refusing every query is trivially correct and useless; reporting coverage alongside precision is what makes the result mean anything. On independently generated answers, resolution rose from 0.966 to 1.000 at a coverage of 0.972.
+
+We also expect the recodification mapping to matter a lot in practice. Queries phrased around familiar IPC sections are still common, and a system that silently answers under superseded law is more dangerous than one that just declines --- the wrong answer sounds fluent and plausible. On the real corpus, retrieval now puts current law first in 8 of 9 cases, and the verifier names the successor in all 9.
+
+\begin{table*}[t]
+\caption{Hallucination Control Across Indian Legal RAG Systems. Reported figures come from each paper's own benchmark and are not directly comparable.}
+\label{tab:compare}
+\centering
+\footnotesize
+\begin{tabular}{@{}p{2.3cm}p{3.2cm}p{2.6cm}p{2.1cm}p{5.4cm}@{}}
+\toprule
+\textbf{System} & \textbf{Citation control} & \textbf{Recodification} & \textbf{Abstention} & \textbf{Reported figures} \\
+\midrule
+BNS Mitra \cite{patil2025} & None & BNS only & No & 87\% accuracy (500 lawyer-checked queries) \\
+\addlinespace
+Nyaya-Sathi \cite{dixit2025} & Database check, partly human & BNS only, no mapping & No & Halluc. 0.25$\rightarrow$0.05; citation acc.\ 0.92 \\
+\addlinespace
+Constitutional Compass \cite{bolla2026} & None reported & Not applicable & No & Hybrid F1 89.4\% \\
+\addlinespace
+Dual-Layer Legal-RAG \cite{bindra2026} & Adversarial evaluator (statistical) & No mapping & No & Halluc. 6.3\%; citation acc.\ 96.1\%; $+$12.8\,s latency \\
+\addlinespace
+\textbf{Is It Legal? (ours)} & \textbf{Deterministic V1--V4, independent audit} & \textbf{1,086 verified pairs; in-force preference} & \textbf{Calibrated gate} & \textbf{Post-verifier resolution 1.000 (28/28); coverage 0.972; $+$1.9\,ms} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Table~XVIII sets the surveyed systems beside ours. Three differences hold whatever the benchmark. First, the kind of control: every other system lowers the rate of fabricated citations statistically or with a human in the loop, so some fraction always gets through, while here a citation that does not resolve to the corpus, or a quotation that is not verbatim, cannot reach the user, and an audit that re-derives this from the emitted text alone confirms it. Nyaya-Sathi comes closest, with a database check, but relies on expert confirmation; ours needs none. Second, the cost: the verifier adds about 1.9\,ms per answer, against the 12.8\,s that graph traversal and adversarial generation add in \cite{bindra2026}. Third, recodification: no surveyed system maps repealed IPC, CrPC or IEA sections to their successors, while ours does so for 1,084 provisions from official tables, at both the retrieval and the verification stage.
+
+What we cannot claim is a lower hallucination rate or a higher citation accuracy than \cite{bindra2026}. Their figures count a real citation attached to the wrong claim as an error; our verifier catches that only through the advisory V5 screen, at a recall of 0.818, and our query sets are small and mostly our own. A like-for-like comparison needs both systems run on one shared benchmark such as AILA or IL-TUR, which is the next step.
+
+\section{Limitations and Threats to Validity}
+
+Several limitations warrant statement in advance. First, and most importantly, the verifier guarantees that citations resolve, not that they are apposite. Section~VII quantifies how far the advisory support screen narrows this gap and where it stops: gross topical mismatch is detected at flagging precision 1.000 and recall 0.818, but topically adjacent misattribution is provably outside the reach of a lexical method, because adjacent provisions share subject-matter vocabulary by construction and differ in grammatical role. Section~VII-J shows the same boundary defeats a graph-based repair for the same reason, and reports a second bound: on citations to provisions that are not semantically self-contained, V5's flagging precision is 0.500 rather than 1.000, improved to 0.667 by consulting the citation graph but not restored. Closing that residue requires semantic entailment judgement, which we deliberately keep outside the deterministic layer --- admitting a model there would forfeit the property that makes the layer trustworthy --- and measure instead through human evaluation restricted to the tractable question of whether the cited text supports the claim.
+
+Second, our corpus is bounded to Central statutes and Supreme Court judgments. State legislation, High Court jurisprudence at scale, and multilingual queries are out of scope, and abstention on such queries is the intended rather than degraded behaviour.
+
+Third, evaluation without legal experts constrains what can be assessed. We mitigate this by relying on community relevance judgments for retrieval and by restricting human evaluation to support verification, which non-lawyers can perform by reading the source.
+
+Fourth, the recodification mapping is only as reliable as the correspondence tables from which it is constructed, and section-to-section correspondence across the 2023 recodification is not always one-to-one.
+
+Fifth, the guarantee is bounded by the parser: a citation the parser fails to extract is never checked, and Section~VII documents twelve such defects found by adversarial audit and live output, and several more found on real text in Section~VII-O, all since repaired. We do not claim the audit was exhaustive, and the guarantee should be read as holding over the citation forms the parser demonstrably covers rather than over legal citation in general.
+
+Sixth, and most importantly for the interpretation of Section~VII, the component measurements in Sections~VII-B to VII-M are taken on a 35-provision development corpus with paraphrased section texts, and the real-corpus measurements rest on sixteen gold questions we wrote, so a difference of one or two questions moves Recall@1 by 0.06 to 0.13. The probe sets are also small and were authored alongside the components they test, so they function as regression baselines rather than as independent validation.
+
+Seventh, the confidence gate is calibrated rather than deterministic, and we do not claim otherwise: it is a tuned threshold on a retrieval score and can both refuse an answerable question and accept an unanswerable one. Its reported performance rests on sixteen unanswerable queries we wrote ourselves, split eight for tuning and eight for reporting, which establishes that the calibration procedure is sound and not that the gate performs at that level on a realistic query distribution; on eight externally sourced questions it abstains on six. The case it is least equipped for --- a question whose answer is partially present, where neither a confident answer nor a refusal is correct --- is absent from the probe set.
+
+Eighth, on the instrumentation itself. The regression harness now asserts explicit numeric thresholds for every figure reported in Section~VII and tests the architectural invariants directly, and Section~VII-M validates it by mutation; this addresses a defect under which the harness confirmed only that its scripts did not crash. Two residual weaknesses should be stated plainly. The mutation set was authored by us, so it establishes that the assertions catch the defects we anticipated, which is the same circularity the probe sets exhibit. And the assertions pin published figures to values recomputed from the development and real corpora, so they detect divergence between the paper and the code but not error common to both: they will report that a recodification mapping's verification flag has been changed without evidence, and they will not report that a mapping is legally wrong.
+
+Ninth, the verifier checks statutory citations only. A case name is not extracted as a citation, so a fabricated precedent passes unchecked, and the judgment corpus of Section~VII-R is not yet connected to verification.
+
+\section{Conclusion}
+
+Every legal RAG system in the surveyed literature controls hallucination statistically, and none reaches zero. This paper has argued that the residual is structural rather than incidental: a probabilistic mechanism cannot supply a guarantee. We have proposed Is It Legal?, whose deterministic citation verifier makes citation faithfulness a property of the architecture rather than of the model, and have situated three supporting contributions --- recodification-aware corpus unification, calibrated abstention, and standardised evaluation --- against specific documented gaps in the literature.
+
+The implementation reported here supports the argument end to end. The verifier's checks fire correctly on planted faults without disturbing clean answers, on the development corpus and on real statutory text, and on answers from an independent model every surviving citation resolves while 97.2\% of sentences are kept. The recodification diagnostic shows a failure mode --- lexical retrieval preferring repealed law to current law in two cases out of three --- that conventional retrieval metrics do not expose and that the verification layer corrects. The quotation-checking negative result is a reminder that the deterministic layer must be designed with the semantics of legal citation in mind rather than borrowed wholesale from generic text matching.
+
+Future work, beyond the AILA and IL-TUR evaluation described here, includes checking case-law citations, traversal of a combined statute--judgment citation graph with authority-weighted reranking, contrastive fine-tuning of the embedding model on relevance judgments mined from AILA, temporal reasoning over amendment history to answer questions of the form ``was X lawful in 2015?'', and multilingual query support for Indian languages.
+
+\section*{Ethical Considerations}
+
+This system is a legal research and citation tool, not a source of legal advice, and is presented to users as such. The access-to-justice case for reducing the cost of locating authority is strong, but so is the risk that a fluent system is over-relied upon by users unable to evaluate it. The abstention mechanism, the visible provenance of every claim, and the prominence of the disclaimer are design responses to that risk rather than afterthoughts. Source materials are public-domain government and judicial documents; no personally identifying case data beyond what is already published by the courts is introduced.
+
+\begin{thebibliography}{00}
+\bibitem{lewis2020} P. Lewis et al., ``Retrieval-augmented generation for knowledge-intensive NLP tasks,'' in \textit{Advances in Neural Information Processing Systems}, vol. 33, 2020, pp. 9459--9474.
+\bibitem{karpukhin2020} V. Karpukhin et al., ``Dense passage retrieval for open-domain question answering,'' in \textit{Proc. EMNLP}, 2020, pp. 6769--6781.
+\bibitem{asai2023} A. Asai, Z. Wu, Y. Wang, A. Sil, and H. Hajishirzi, ``Self-RAG: Learning to retrieve, generate, and critique through self-reflection,'' arXiv:2310.11511, 2023.
+\bibitem{sarthi2024} P. Sarthi, S. Abdullah, A. Tuli, S. Khanna, A. Goldie, and C. D. Manning, ``RAPTOR: Recursive abstractive processing for tree-organized retrieval,'' arXiv:2401.18059, 2024.
+\bibitem{es2023} S. Es, J. James, L. Espinosa-Anke, and S. Schockaert, ``RAGAS: Automated evaluation of retrieval augmented generation,'' arXiv:2309.15217, 2023.
+\bibitem{dahl2024} M. Dahl, V. Magesh, M. Suzgun, and D. E. Ho, ``Large legal fictions: Profiling legal hallucinations in large language models,'' \textit{Journal of Legal Analysis}, vol. 16, no. 1, pp. 64--93, 2024.
+\bibitem{paul2023} S. Paul, A. Mandal, P. Goyal, and S. Ghosh, ``Pre-trained language models for the legal domain: A case study on Indian law,'' in \textit{Proc. 19th Int. Conf. Artificial Intelligence and Law (ICAIL)}, 2023.
+\bibitem{malik2021} V. Malik et al., ``ILDC for CJPE: Indian legal documents corpus for court judgment prediction and explanation,'' in \textit{Proc. ACL}, 2021, pp. 4046--4062.
+\bibitem{joshi2024} A. Joshi, S. Paul, A. Sharma, P. Goyal, S. Ghosh, and A. Modi, ``IL-TUR: Benchmark for Indian legal text understanding and reasoning,'' in \textit{Proc. ACL}, 2024.
+\bibitem{chalkidis2020} I. Chalkidis, M. Fergadiotis, P. Malakasiotis, N. Aletras, and I. Androutsopoulos, ``LEGAL-BERT: The muppets straight out of law school,'' in \textit{Findings of EMNLP}, 2020.
+\bibitem{zheng2021} L. Zheng, N. Guha, B. R. Anderson, P. Henderson, and D. E. Ho, ``When does pretraining help? Assessing self-supervised learning for law and the CaseHOLD dataset,'' in \textit{Proc. ICAIL}, 2021.
+\bibitem{mamakas2022} D. Mamakas, P. Tsotsi, I. Androutsopoulos, and I. Chalkidis, ``Processing long legal documents with pre-trained transformers: Modding LegalBERT and Longformer,'' in \textit{Proc. Natural Legal Language Processing Workshop}, 2022, pp. 130--142.
+\bibitem{bhattacharya2019} P. Bhattacharya, K. Ghosh, S. Ghosh et al., ``Overview of the FIRE 2019 AILA track: Artificial intelligence for legal assistance,'' in \textit{FIRE 2019 Working Notes}, CEUR-WS, 2019.
+\bibitem{patil2025} B. Patil, R. Alam, T. V. Kalal, N. S. Kushwaha, P. Porwal, and N. Sharma, ``BNS Mitra: RAG-optimized LLM based AI-powered legal virtual assistant,'' in \textit{Proc. 3rd Int. Conf. Communication, Security, and Artificial Intelligence (ICCSAI)}, 2025, pp. 1501--1506.
+\bibitem{dixit2025} A. Dixit, V. Jain, S. Yadav, V. Tiwari, S. Awasthi, P. Trivedi, and T. Choudhury, ``Nyaya Sathi: A BNS-aware legal assistant,'' in \textit{Proc. Int. Conf. Computational Intelligence and Knowledge Economy (ICCIKE)}, 2025, pp. 777--781.
+\bibitem{bolla2026} D. R. Bolla, A. Joshi, N. HM, and P. S. Devang, ``Constitutional Compass: A retrieval-augmented generation framework for Indian legal and constitutional analysis,'' in \textit{Proc. IEEE Int. Conf. Convergence in Computing Technology (I3CTCON)}, 2026.
+\bibitem{bindra2026} J. S. Bindra, H. Chaturvedi, S. Singh, and S. K. Singh, ``Dual-layer Legal-RAG framework integrating citation graphs and adversarial learning for decision support in Indian judiciary,'' in \textit{Proc. Int. Conf. NextGen Data Science and Analytics (IC-NDSA)}, 2026.
+\bibitem{rustamov2025} Z. Rustamov, M. Gasimzade, and S. Rustamov, ``Enhancing retrieval and re-ranking in RAG: A case study on tax law,'' in \textit{Proc. IEEE 19th Int. Conf. Application of Information and Communication Technologies (AICT)}, 2025.
+\bibitem{sun2025} Y. Sun, ``Adaptive hybrid retrieval-augmented generation with context-aware confidence control,'' in \textit{Proc. 4th Int. Conf. Electronic Information Technology (EIT)}, 2025, pp. 891--895.
+\end{thebibliography}
+
+\end{document}

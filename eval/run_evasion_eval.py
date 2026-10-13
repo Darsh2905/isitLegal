@@ -11,7 +11,12 @@ from eval.verifier_probes import EVASION_PROBES, CONTEXT
 HARD_VIOLATIONS = (Violation.NONEXISTENT_PROVISION,
                    Violation.UNSUPPORTED_QUOTE,
                    Violation.REPEALED_PROVISION,
-                   Violation.UNRESOLVED_MARKER)
+                   Violation.UNRESOLVED_MARKER,
+                   # Added with the fail-closed revision: each strips.
+                   Violation.UNKNOWN_ACT,
+                   Violation.UNPLACED_REFERENCE,
+                   Violation.UNKNOWN_CASE,
+                   Violation.UNPARSED_REFERENCE)
 
 
 def report():

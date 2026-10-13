@@ -60,7 +60,14 @@ class Pipeline:
         self.retriever = retriever
         self.gate = gate
         self.client = client
-        self.verifier = verifier or CitationVerifier(db, repair=True, support=True)
+        if verifier is None:
+            # Case citations resolve against the judgment corpus when its
+            # cache is present (ingest/scrape_judgments.py); with an empty
+            # index every case citation is stripped, the closed-world default.
+            from ingest.case_citations import build_case_index
+            verifier = CitationVerifier(db, repair=True, support=True,
+                                        cases=build_case_index())
+        self.verifier = verifier
         self.top_k = top_k
         # Optional Stage 3. With passage-window scoring (retrieval/rerank.py)
         # it is the best-measured configuration on the real corpus (MRR@10

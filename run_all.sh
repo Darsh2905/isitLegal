@@ -5,7 +5,8 @@
 #   ./run_all.sh          pytest assertions, every eval table, then the paper
 #   ./run_all.sh --tests  pytest assertions only (fast; use in a pre-commit hook)
 #   ./run_all.sh --evals  eval tables only (regenerating numbers for the paper)
-#   ./run_all.sh --paper  rebuild paper.pdf and check the build is clean
+#   ./run_all.sh --paper  regenerate round2_figures.tex, rebuild
+#                         is_it_legal_final.pdf and check the build is clean
 #
 # Exits nonzero if any assertion fails or any eval script errors.
 #
@@ -71,13 +72,21 @@ run_paper() {
         echo "  tectonic not installed -- skipping (brew install tectonic)"
         return
     fi
-    if [ ! -f paper.tex ]; then
-        echo "  paper.tex not present -- skipping"
+    local paper=is_it_legal_final.tex
+    if [ ! -f "$paper" ]; then
+        echo "  $paper not present -- skipping"
+        return
+    fi
+    # The paper's live-round, support, latency and test-count figures are
+    # generated, never typed (eval/make_paper_figures.py).
+    if ! python3 eval/make_paper_figures.py; then
+        echo "  figure generation FAILED"
+        FAILED=1
         return
     fi
 
     local log; log="$(mktemp)"
-    if ! tectonic --print --keep-logs paper.tex >"$log" 2>&1; then
+    if ! tectonic --print --keep-logs "$paper" >"$log" 2>&1; then
         echo "  BUILD FAILED"
         tail -30 "$log"
         FAILED=1
@@ -102,7 +111,7 @@ run_paper() {
         grep -E 'Overfull|(Reference|Citation) `.*undefined' "$final" | head -20
         FAILED=1
     else
-        echo "  paper.pdf: clean build"
+        echo "  is_it_legal_final.pdf: clean build"
     fi
     rm -f "$log" "$final"
 }
@@ -120,7 +129,7 @@ echo "=============================================================="
 if [ "$FAILED" -eq 0 ]; then
     echo " ALL CHECKS PASSED"
 else
-    echo " FAILURES PRESENT -- do not update paper.tex from this run"
+    echo " FAILURES PRESENT -- do not update the paper from this run"
 fi
 echo "=============================================================="
 exit "$FAILED"

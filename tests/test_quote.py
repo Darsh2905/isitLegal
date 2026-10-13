@@ -1,8 +1,10 @@
 """
-Quotation check V4 (paper VII-C), including the character-vs-token negative
-result: character-level fuzzy matching scored a meaning-inverting one-word
-substitution at 95.9%. Token-level scoring is what makes theta=0.95 an
-empirical rather than arbitrary choice -- these tests lock that in.
+Quotation check V4, including the character-vs-token negative result
+(character-level fuzzy matching scored a meaning-inverting one-word
+substitution at 95.9%) and its sequel: token-level scoring at theta=0.95
+was itself length-dependent -- a substitution at either end of a 20+ token
+quote scores (n-1)/n >= 0.95 and passed. The deployed rule is now exact
+(theta=1.0); the length sweep on real provisions locks that in.
 """
 
 
@@ -13,9 +15,33 @@ def test_quote_checks_actually_ran(quote):
 
 
 def test_perfect_separation_at_deployed_theta(quote):
-    at95 = quote["sweep"][0.95]
-    assert at95["fp"] == 0 and at95["fn"] == 0
-    assert at95["precision"] == 1.0 and at95["recall"] == 1.0
+    at100 = quote["sweep"][1.0]
+    assert at100["fp"] == 0 and at100["fn"] == 0
+    assert at100["precision"] == 1.0 and at100["recall"] == 1.0
+
+
+def test_deployed_theta_is_exact():
+    from verify.verifier import CitationVerifier
+    from ingest.metadata_db import build_seed_db
+    assert CitationVerifier(build_seed_db()).theta == 1.0
+
+
+def test_exact_matching_rejects_every_substitution_at_every_length(quote):
+    for (theta, n), r in quote["length_sweep"].items():
+        if theta == 1.0:
+            assert r["substitution_accepted"] == 0, (n, r)
+            assert r["faithful_accepted"] == r["faithful_n"], (n, r)
+
+
+def test_theta_095_fails_on_long_quotations(quote):
+    # The reviewer's point, measured: at 0.95 an edge substitution passes
+    # once the quote reaches 20 tokens (and at 40, the second word too).
+    ls = quote["length_sweep"]
+    assert ls[(0.95, 19)]["substitution_accepted"] == 0
+    assert ls[(0.95, 20)]["substitution_accepted"] > 0
+    assert (ls[(0.95, 40)]["substitution_accepted"]
+            > ls[(0.95, 20)]["substitution_accepted"])
+    assert ls[(0.98, 60)]["substitution_accepted"] > 0
 
 
 def test_near_miss_substitution_is_caught_at_095(quote):

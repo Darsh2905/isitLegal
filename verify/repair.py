@@ -172,8 +172,21 @@ def repair_superseded(sentence: str, idx: int, db: MetadataDB) -> Tuple[str, Opt
     out = sentence
     changed: List[str] = []
 
-    for cit in sorted(extract_citations(sentence),
-                      key=lambda c: -c.start):  # right-to-left; offsets stable
+    cits = extract_citations(sentence)
+    # Members of one enumeration ("sections 302 and 420 of the IPC") share a
+    # single span. Splicing a replacement in once per member corrupted the
+    # sentence -- "Section 318 BNS* (formerly sections 302 and 420 of the
+    # IPC)ions 302 and 420 of the IPC)" -- and the garbled text then passed
+    # re-verification, because every citation left in it still resolved. Found
+    # by the fail-closed residual scan (verify/residual.py), which flagged the
+    # orphaned "420 of the IPC" no extractor could read. An enumeration is now
+    # left for V3, which annotates each member with its successor.
+    span_count = {}
+    for c in cits:
+        span_count[(c.start, c.end)] = span_count.get((c.start, c.end), 0) + 1
+    for cit in sorted(cits, key=lambda c: -c.start):  # right-to-left; offsets stable
+        if span_count[(cit.start, cit.end)] > 1:
+            continue
         prov = db.resolve(cit.key)
         if prov is None or prov.repealed_by is None:
             continue

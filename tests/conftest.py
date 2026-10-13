@@ -36,6 +36,11 @@ def quote():
 
 
 @pytest.fixture(scope="session")
+def failclosed():
+    return _report("eval.run_failclosed_eval")
+
+
+@pytest.fixture(scope="session")
 def retrieval():
     return _report("eval.run_retrieval_eval")
 
@@ -112,6 +117,56 @@ class FakeClient:
     def complete(self, system: str, user: str) -> str:
         self.calls.append((system, user))
         return self.response
+
+
+@pytest.fixture(scope="session")
+def real_corpus_report():
+    return _report("eval.run_real_corpus_eval")
+
+
+@pytest.fixture(scope="session")
+def fusion():
+    return _report("eval.run_fusion_eval")
+
+
+@pytest.fixture(scope="session")
+def rerank():
+    return _report("eval.run_rerank_eval")
+
+
+@pytest.fixture(scope="session")
+def dense():
+    return _report("eval.run_dense_eval")
+
+
+@pytest.fixture(scope="session")
+def aila():
+    return _report("eval.run_aila_eval")
+
+
+@pytest.fixture(scope="session")
+def provenance():
+    return _report("eval.run_provenance_eval")
+
+
+@pytest.fixture(scope="session")
+def mapping_audit():
+    return _report("eval.run_mapping_audit")
+
+
+@pytest.fixture(scope="session")
+def live_round2():
+    return _report("eval.run_live_round2_eval")
+
+
+@pytest.fixture(scope="session")
+def support_labels():
+    return _report("eval.run_support_labels_eval")
+
+
+@pytest.fixture(scope="session")
+def latency():
+    return _report("eval.run_latency_eval")
 
 
 @pytest.fixture(scope="session")

@@ -28,6 +28,8 @@ from retrieval.dense import DenseEncoder, DenseRetriever, MODEL_IDS
 from retrieval.fusion import FusedRetriever
 from retrieval.rerank import Reranker
 from verify.verifier import CitationVerifier, Chunk
+from ingest.case_citations import build_case_index
+from eval.citation_audit import citation_stats, strip_annotations
 from eval.generation_answers import UNGROUNDED_ANSWERS, GROUNDED_ANSWERS
 from eval.gold_qa import GOLD
 
@@ -66,55 +68,23 @@ def _retrieve_chunks_for_gold(db):
 
 def _citation_stats(answer, chunks, db, ver):
     """
-    Independently re-derived citation counts (mirrors the audit() pattern in
-    eval/run_repair_eval.py -- re-derive, don't just trust the verifier's own
-    report), split into two DIFFERENT things on purpose:
+    Independently re-derived citation counts -- the shared audit in
+    eval/citation_audit.py, which re-derives every citation form the verifier
+    checks (statutory, unknown-act, bare, case, marker, unreadable) from the
+    text alone rather than trusting the verifier's own report. Two DIFFERENT
+    things are counted on purpose:
 
-      bad        -- violates the core guarantee (V1/V2/V4): an unresolved
-                    marker or a citation to a provision that does not exist
-                    in the corpus at all. This is what "precision 1.0 by
-                    construction" actually promises, and it is what must be
-                    exactly zero after verification.
+      bad        -- violates the core guarantee (V1/V2/V4): a citation in
+                    any form that does not resolve to the corpus. This is
+                    what "resolution 1.0 by construction" promises, and it
+                    must be exactly zero after verification.
       unmapped_repealed -- cites real, existing, but REPEALED law with no
-                    recorded successor in this project's mapping table.
-                    CLAUDE.md invariant 2 makes V3 annotate-only, by design
-                    (Section IX): these are correctly left in the answer,
-                    annotated, not stripped. Counting these as "bad" would
-                    measure something the verifier never promised to
-                    guarantee -- that every repealed reference resolves to a
-                    KNOWN successor, which depends on this project's own
-                    still-partial mapping coverage, not on the verifier.
-
-    Conflating the two in an earlier version of this script produced a
-    post-verifier accuracy below 1.000 and looked like a violation of the
-    core guarantee. It was not: every instance traced to Section 499-502 of
-    the ungrounded IPC defamation answer, where only IPC section 499 has a
-    recorded BNS mapping and sections 500-502 do not -- a real, honestly
-    reported gap in mapping coverage, not a citation that fails to resolve.
+                    recorded successor. V3 annotates these by design
+                    (CLAUDE.md invariant 2); counting them as "bad" would
+                    measure mapping coverage, not the verifier.
     """
-    import re
-    total = 0
-    bad = 0
-    unmapped_repealed = 0
-    for c in extract_citations(answer):
-        total += 1
-        prov = db.resolve(c.key)  # same pinpoint->section rule as V2
-        if prov is None:
-            bad += 1
-        elif prov.repealed_by is not None and not db.successor(prov.key):
-            unmapped_repealed += 1
-    # A section cited to an act the corpus does not contain (real or
-    # invented) is a citation that does not resolve -- it counted as nothing
-    # at all before extract_unresolved_act_refs existed, which made
-    # pre-verifier accuracy look better than it was.
-    for _ref in extract_unresolved_act_refs(answer):
-        total += 1
-        bad += 1
-    for n in re.findall(r"\[(\d+)\]", answer):
-        total += 1
-        if not any(c.index == int(n) for c in chunks):
-            bad += 1
-    return total, bad, unmapped_repealed
+    total, bad, unmapped, _ = citation_stats(answer, chunks, db, ver.cases)
+    return total, bad, unmapped
 
 
 def _run_condition(name, answers, chunks_by_qid, db, ver):
@@ -126,7 +96,7 @@ def _run_condition(name, answers, chunks_by_qid, db, ver):
         total, bad, unmapped = _citation_stats(answer, chunks, db, ver)
         out, rep = ver.verify(answer, chunks)
         post_total, post_bad, post_unmapped = _citation_stats(
-            out.split("\n\nNote:")[0], chunks, db, ver)
+            strip_annotations(out), chunks, db, ver)
         rows.append({"qid": qid, "pre_total": total, "pre_bad": bad,
                     "pre_unmapped": unmapped,
                     "post_total": post_total, "post_bad": post_bad,
@@ -160,7 +130,8 @@ def _run_condition(name, answers, chunks_by_qid, db, ver):
 
 def report():
     db = build_real_db()
-    ver = CitationVerifier(db, repair=True, support=False)
+    ver = CitationVerifier(db, repair=True, support=False,
+                           cases=build_case_index())
 
     print("PRE/POST-VERIFIER HALLUCINATION COMPARISON")
     print("=" * 78)

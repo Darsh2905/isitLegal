@@ -78,11 +78,17 @@ def test_repair_actually_fires_on_real_generated_text(generation):
     # text, only on hand-authored probes.
     rows = generation["ungrounded"]["rows"]
     repaired_queries = sum(1 for r in rows if r["findings"] > 0)
-    # 9 of 16: the other 7 cite only already-current-law Acts (BNS, BNSS,
-    # BSA, the Constitution, NIA, ICA, ITA) with nothing to repair.
-    assert repaired_queries == 9, (
+    # 9 of 16 cite repealed Acts. A tenth, q09, cites a precedent --
+    # "Shreya Singhal v. Union of India" -- that is real but not in the
+    # 110-judgment corpus; since case citations are verified (2026-10) it is
+    # stripped as unresolvable, the closed-world cost of the case check, and
+    # with no retrieved chunk to attest it (the GROUNDED q09 quotes the
+    # retrieved IT Act s.66A text, which does, and is kept).
+    assert repaired_queries == 10, (
         f"{repaired_queries}/16 ungrounded answers triggered a finding; "
-        f"expected exactly 9 for the recorded answers")
+        f"expected exactly 10 for the recorded answers")
+    q09 = next(r for r in rows if r["qid"] == "q09")
+    assert q09["coverage"] == pytest.approx(0.5)
 
 
 def test_a_real_quotation_error_was_caught(generation):

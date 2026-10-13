@@ -50,9 +50,16 @@ def test_pre_verifier_resolution_accuracy(live_generation):
     # because citations to unrecognised act names were invisible to the
     # extractor (see ingest/normalize.extract_unresolved_act_refs); the
     # error was always in the output, the evaluation could not see it.
+    #
+    # The total rose from 29 to 49 in the fail-closed revision (2026-10)
+    # without the answers changing: the audit now also counts bare sections
+    # ("Section 41", 8 of them), the gpt-oss lenticular markers ("\u30104\u3011")
+    # that V1 used to ignore, and "Const \u00a722", an abbreviation the alias
+    # table lacked. Every one of the 20 added citations resolves; the one
+    # unresolvable citation is still the Samvidhan Adhiniyam.
     assert live_generation["pre_bad"] == 1
-    assert live_generation["pre_total"] == 29
-    assert live_generation["pre_accuracy"] == pytest.approx(28 / 29)
+    assert live_generation["pre_total"] == 49
+    assert live_generation["pre_accuracy"] == pytest.approx(48 / 49)
 
 
 def test_post_verifier_resolution_accuracy_is_the_core_guarantee(live_generation):

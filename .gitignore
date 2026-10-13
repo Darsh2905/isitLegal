@@ -26,3 +26,7 @@ data/raw_judgments/*.html
 *.out
 abstract.tex
 .DS_Store
+
+# Downloaded benchmark / official texts (fetch with ingest/fetch_external.sh)
+data/aila/
+data/official/

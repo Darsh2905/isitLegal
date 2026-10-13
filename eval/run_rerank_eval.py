@@ -52,7 +52,10 @@ def report():
     for qid, q, rel, _ in GOLD:
         gold_by_query[qid] = rel
         cands = fused.search(q, 20)
-        fused_rank[qid] = [k for k, _ in cands]
+        # Truncated at 10 like every other row: the fused row's MRR was
+        # previously taken over all 20 candidates, which made it differ from
+        # the fusion table's MRR@10 for the same ranking.
+        fused_rank[qid] = [k for k, _ in cands][:10]
         whole_rank[qid] = [k for k, _ in reranker_whole.rerank(q, cands, top_k=10)]
         reranked = reranker.rerank(q, cands, top_k=10)
         rerank_rank[qid] = [k for k, _ in reranked]

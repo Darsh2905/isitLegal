@@ -33,7 +33,12 @@ def report():
     bm25 = BM25Retriever(db)
     enc = DenseEncoder(MODEL_IDS["general"])
     dense = DenseRetriever(db, enc)
-    fused = FusedRetriever([("bm25", bm25), ("dense", dense)])
+    # candidate_k=20: the DEPLOYED depth (pipeline, app, rerank eval). This
+    # table previously fused each arm's top 50 (the class default) while the
+    # reranking table fused each arm's top 20, so the paper's two "RRF fusion"
+    # rows disagreed (MRR@10 0.690 vs 0.676) with no stated reason -- a
+    # reviewer caught it. Both now measure the one deployed configuration.
+    fused = FusedRetriever([("bm25", bm25), ("dense", dense)], candidate_k=20)
 
     results = {"bm25": _eval(bm25), "dense": _eval(dense), "bm25+rrf+dense": _eval(fused)}
 

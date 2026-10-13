@@ -79,7 +79,11 @@ def get_bm25_unstemmed():
 def get_verifier(repair=True, support=True):
     db = get_real_db()
     graph = build_graph(db) if support else None
-    return CitationVerifier(db, repair=repair, support=support, graph=graph)
+    # Case citations are verified against the judgment corpus; without the
+    # index every case citation would be stripped as unresolvable.
+    from ingest.case_citations import build_case_index
+    return CitationVerifier(db, repair=repair, support=support, graph=graph,
+                            cases=build_case_index())
 
 
 # Recalibrated separately for the real corpus by eval/run_confidence_real_eval.py

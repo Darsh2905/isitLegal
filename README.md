@@ -1,7 +1,9 @@
-# Is It Legal? — implementation (partial)
+# Is It Legal? — RAG with deterministic, fail-closed citation verification for Indian law
 
-Phase 1 scaffold for the RAG legal-citation engine. Deterministic components
-first: they are the paper's novel contribution and need no network or GPU.
+The paper is `is_it_legal_final.tex` (build: `tectonic is_it_legal_final.tex`;
+its round-2/support/latency figures are generated into `round2_figures.tex` by
+`python3 eval/make_paper_figures.py`). `paper.tex` is the superseded
+pre-revision draft and is no longer checked by the test suite.
 
 ## Status
 
@@ -9,6 +11,11 @@ first: they are the paper's novel contribution and need no network or GPU.
 |---|---|
 | Citation normaliser | done — 48/48 surface forms, 0 false positives; now also detects sections cited to acts **outside the corpus** (real or invented) and no longer reads an act's own year ("IPC 1860") as a section |
 | Metadata DB + IPC↔BNS mapping | done — real corpus: the full UP Police correspondence tables (1,086 verified section-level pairs); 1,084 of 1,264 repealed provisions now have a recorded successor (was 11). Sub-section pinpoints ("Art. 19(1)(a)") resolve to their section only if the labels occur, as labels, in its text |
+| Fail-closed revision (peer review, 2026-10) | done — see "Peer-review revision" below: exact quotations, bare references, case citations, a residual scan that strips any reference the parser cannot read; 22/22 new faults stripped, 24/24 correct forms kept (pre-revision code: 1/22, 23/24) |
+| Second live round (3 models, AILA queries) | done — 181 answers; resolution 0.984→1.000 grounded, 0.705→1.000 ungrounded (independent audit); coverage 0.922 / 0.738 |
+| Support vs resolution (labelled sample) | done — 90 sentences: 0.889 of grounded sentences fully supported, 0.356 of ungrounded; V5 flag precision 0.500 on real output |
+| AILA 2019 statute retrieval (official qrels) | done — best arm MAP 0.0782 vs track best 0.1566: mid-table, reported as a negative result |
+| Provenance (Gazette) + mapping cross-check | done — 1,040/1,054 BNS/BNSS/BSA sections match the Gazette text; 399/402 IPC→BNS pairs agree with an independent CAPT Bhopal table |
 | Deterministic verifier (V1–V4) | done — toy corpus: 13/13 planted faults, 0 false alarms. **Real corpus (new adversarial probe set): 17/17 faults stripped, 14/14 correct citations kept, independent audit 31/31** — the original code scored 12/17 and 8/14 on the same probes. See "Verifier on the real corpus" below |
 | Parser evasion resistance | done — 20/20 concealed faults caught (11 defects, 3 audit rounds — the 3rd found live via the demo, not adversarial construction), 0 false positives |
 | Support screen V5 (advisory) | done — flags 9/11 wrong attributions, 0 false positives |
@@ -20,16 +27,68 @@ first: they are the paper's novel contribution and need no network or GPU.
 | Confidence gate / calibrated abstention (C3) | done — toy corpus: 8/8 held-out abstentions, 8/8 held-out answers; recalibrated on the real corpus (τ=1.077, balanced accuracy 0.938); **out-of-sample check on 8 real, externally-sourced queries: 6/8 correct (0.750)** — see below |
 | Real statutory corpus (3,275 verbatim provisions, all 10 Acts) | done — replaces saturation (BM25 Recall@1 1.000→0.375 unstemmed). State/UT amendment tables no longer pollute central-law text; 12 inserted Evidence Act sections recovered (incl. §113-B, §65B's siblings, the long-standing §67A gap); IEA §90A corrected (was Uttar Pradesh's §90-A) |
 | Dense retrieval (InLegalBERT vs general embedding) | done — general model wins; passage windows help both (general Recall@1 0.438→0.562, InLegalBERT 0.250→0.312); see caveat below |
-| RRF fusion (BM25 + dense) | done — MRR@10 0.690, Recall@10 1.000, beats both single arms (stemmed BM25 + passage-window dense) |
+| RRF fusion (BM25 + dense) | done — at the deployed depth (20 per arm): MRR@10 0.676, Recall@10 0.938, beats both single arms. (Earlier 0.690/1.000 used depth 50 and disagreed with the rerank table; both now use the deployed depth) |
 | Cross-encoder reranking | done — scored over passage windows: MRR@10 0.676→0.821, nDCG@10 0.684→0.786, Recall@1 0.562→0.750. Whole-provision reranking *hurts* (0.676→0.626) — truncation, now fixed |
 | End-to-end pipeline wiring (Stages 1–7) | done — now run live, end to end (gate → retrieval → real Groq generation → verifier), `eval/run_live_generation_eval.py` |
 | Generation experiment, self-composed (16 answers → verifier) | done — 1.000 pre/post citation resolution; not blinded, see below |
 | Generation experiment, live + independently invoked (Groq) | done — gate passes 10/16 gold queries end-to-end, 0/16 unanswerable wrongly answered; citation resolution **0.966 pre-verifier (28/29) → 1.000 post (28/28)**, mean coverage 0.972. The one pre-verifier error (a mis-named act) was invisible to earlier revisions. V4 strips 3 quotations and accepts 5 faithful elisions — still a project-authored query set, see below |
 | Judgment corpus + paragraph-level parent-document retrieval | done — 110 real Supreme Court judgments (Indian Kanoon, not ILDC directly — see below), naive-vs-parent-document chunking measured for the first time: **near-tie** (Recall@1 0.900 both, MRR@10 0.942 naive vs 0.925 parent-document), not yet reflected in the paper |
-| Regression harness (pytest, pinned deps, `run_all.sh`) | done — 282 assertions; 278 pass, **4 paper-consistency checks fail by design until `paper.tex` is updated** (see "Numbers the paper still states" below) |
+| Regression harness (pytest, pinned deps, `run_all.sh`) | done — 321 tests; paper-consistency checks now target `is_it_legal_final.tex` and the generated `round2_figures.tex` |
 | Live demo (`app.py`, Streamlit) | done — see "Demo" below |
 
-## This revision: fixes and what they measured
+## Peer-review revision (2026-10)
+
+A reviewer judged the claims stronger than the evidence. Each point was
+checked against the code before anything was changed; all held.
+
+- **"Precision 1.0" was resolution under a support name.** The paper now
+  reports citation *resolution* (by construction) and citation *support*
+  (measured on a fixed random sample of 90 surviving sentences, author-labelled,
+  `eval/run_support_labels_eval.py`) separately. Grounded: 0.889 fully
+  supported; ungrounded: 0.356. V5's flagging precision on real output is
+  0.500, against 1.000 on its own probes.
+- **Case law was claimed but not checked.** `ingest/case_citations.py`
+  extracts case names and SC reporter citations and the verifier resolves them
+  against the 110-judgment corpus (or the retrieved text, where the statute
+  itself cites a case). Closed world: a real precedent outside the corpus is
+  stripped. Title changed to "...for Indian Law".
+- **theta = 0.95 was length-dependent.** One substituted word at either end
+  of a 20+ token quote scored (n-1)/n and passed. V4 is now exact
+  (`eval/run_quote_eval.py` length sweep). Also found: the segmenter split
+  quotations at internal full stops, letting a quote's tail escape V4.
+- **Fail-open parser.** `verify/residual.py` strips any reference-shaped span
+  no extractor claimed. Behind the *pre-revision* parser it alone catches all
+  17 citation-form faults that parser missed
+  (`BEFORE_ROOT=<old checkout> python3 eval/run_failclosed_eval.py`). On real
+  output it fires on 70 of 6,433 sentences; every instance is listed by
+  `eval/run_live_round2_eval.py`.
+- **Evaluation too thin.** Second live round (`eval/capture_live_round2.py`,
+  frozen in `eval/live_round2_answers.json`): 3 models, AILA fact situations,
+  grounded and ungrounded, 181 answers, with Wilson CIs (`eval/stats.py`). Its
+  independent audit initially found 30 unresolved citations surviving
+  verification -- three verifier defects (context from stripped sentences,
+  placement past an unknown act name, case names split by the segmenter), all
+  fixed; post-verification resolution is now 1.000 in every cell.
+- **C4 undelivered.** AILA 2019 Task 2 with official qrels
+  (`eval/run_aila_eval.py`, data in `data/aila/`): mid-table, stated as such.
+  RAGAS and IL-TUR still not run; the paper says so.
+- **Tables XIII/XIV disagreed** (fusion depth 50 vs 20, MRR over 20 vs 10).
+  Both now measure the deployed configuration.
+- **Provenance.** `eval/run_provenance_eval.py` checks the corpus against the
+  Gazette of India text of the BNS, BNSS and BSA (`data/official/`);
+  `eval/run_mapping_audit.py` cross-checks the UP Police mapping against a
+  CAPT Bhopal table. The paper no longer calls the UP Police tables official.
+- **Also found and fixed:** R2 corrupting enumerations ("...IPC)ons 302 and
+  420") and gluing words after act-first citations; lenticular markers
+  invisible to V1; uncheckable quotations passed instead of stripped;
+  `extract_citations` memoised (verification median ~8 ms per answer, cold,
+  `eval/run_latency_eval.py`).
+- **Restructure.** Real-corpus results lead Section VII; the 35-provision
+  development-corpus experiments are in an appendix. None of their numbers
+  changed in this revision -- those probe sets could not contain any construct
+  it fixed.
+
+## Earlier revision: fixes and what they measured
 
 An architecture scan (2026-09-23) found bugs that were costing the
 verifier both precision and coverage on real text, plus retrieval

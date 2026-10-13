@@ -32,6 +32,9 @@ from ingest.normalize import extract_citations, extract_unresolved_act_refs
 from retrieval.bm25_baseline import BM25Retriever
 from retrieval.confidence import ConfidenceGate
 from verify.verifier import CitationVerifier, Chunk
+from ingest.case_citations import build_case_index
+from eval.citation_audit import citation_stats, strip_annotations
+from eval.stats import fmt
 from eval.gold_qa import GOLD
 from eval.unanswerable_qa import UNANSWERABLE_DEV, UNANSWERABLE_TEST
 from eval.live_generation_answers import LIVE_ANSWERABLE, LIVE_UNANSWERABLE_ALL_ABSTAINED
@@ -39,37 +42,17 @@ from eval.live_generation_answers import LIVE_ANSWERABLE, LIVE_UNANSWERABLE_ALL_
 REAL_CORPUS_TAU = 1.077
 
 
-def _citation_stats(answer, chunks, db):
-    """Identical definition to run_generation_eval.py's _citation_stats --
-    see that function's docstring for why "bad" (V1/V2/V4 violations) and
-    "unmapped_repealed" (V3, annotate-by-design) are counted separately."""
-    total = 0
-    bad = 0
-    unmapped_repealed = 0
-    for c in extract_citations(answer):
-        total += 1
-        prov = db.resolve(c.key)  # same pinpoint->section rule as V2
-        if prov is None:
-            bad += 1
-        elif prov.repealed_by is not None and not db.successor(prov.key):
-            unmapped_repealed += 1
-    # A section cited to an act the corpus does not contain (real or
-    # invented) is a citation that does not resolve -- it counted as nothing
-    # at all before extract_unresolved_act_refs existed, which made
-    # pre-verifier accuracy look better than it was.
-    for _ref in extract_unresolved_act_refs(answer):
-        total += 1
-        bad += 1
-    for n in re.findall(r"\[(\d+)\]", answer):
-        total += 1
-        if not any(c.index == int(n) for c in chunks):
-            bad += 1
-    return total, bad, unmapped_repealed
+def _citation_stats(answer, chunks, db, cases):
+    """Shared independent audit (eval/citation_audit.py): every citation
+    form the verifier checks, re-derived from the text alone."""
+    total, bad, unmapped, _ = citation_stats(answer, chunks, db, cases)
+    return total, bad, unmapped
 
 
 def report():
     db = build_real_db()
-    ver = CitationVerifier(db, repair=True, support=True)
+    cases = build_case_index()
+    ver = CitationVerifier(db, repair=True, support=True, cases=cases)
     by_key = {p.key: p for p in db.all_provisions()}
 
     print("LIVE PRE/POST-VERIFIER COMPARISON (independently invoked generator)")
@@ -131,10 +114,10 @@ def report():
         chunks = [Chunk(i, k, by_key[k].text, by_key[k].verbatim)
                  for i, k in enumerate(chunk_keys, start=1)]
 
-        pre_total, pre_bad, pre_unmapped = _citation_stats(answer, chunks, db)
+        pre_total, pre_bad, pre_unmapped = _citation_stats(answer, chunks, db, cases)
         out, rep = ver.verify(answer, chunks)
         post_total, post_bad, post_unmapped = _citation_stats(
-            out.split("\n\nNote:")[0], chunks, db)
+            strip_annotations(out), chunks, db, cases)
 
         rows.append({"qid": qid, "pre_total": pre_total, "pre_bad": pre_bad,
                     "pre_unmapped": pre_unmapped, "post_total": post_total,

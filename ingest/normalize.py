@@ -19,6 +19,7 @@ referential vocabulary.
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional, List
 
 # ---------------------------------------------------------------------------
@@ -62,6 +63,9 @@ ACT_ALIASES = {
     "CONST": [
         "constitution of india", "indian constitution", "the constitution",
         "constitution",
+        # "Const §22" -- written by gpt-oss-20b in the live round; without the
+        # alias the bare "§22" was placed in whatever act was cited earlier.
+        "const.", "const",
     ],
     "ICA": [
         "indian contract act, 1872", "indian contract act", "contract act",
@@ -81,14 +85,25 @@ _ACT_PATTERN = "|".join(re.escape(a) for a, _ in _ALL_ALIASES)
 # The letter suffix must be immediately adjacent to the digits and must not be
 # followed by another letter -- otherwise "Article 14 of the Constitution"
 # captures the "o" of "of" as a suffix, and "154 Cr.P.C." captures the "C".
+# The hyphenated suffix ("65-B", "66-A") is at most three characters and never
+# crosses a line break: "BSA \u00a76**\n- Declares that..." -- a heading then a
+# bullet -- otherwise parsed as section "6-Declares".
 _NUM = (
     r"\d+[A-Za-z]?(?![A-Za-z])"
-    r"(?:\s*[-–]\s*[A-Za-z0-9]+)?"
+    r"(?:[^\S\n]*[-–][^\S\n]*[A-Za-z0-9]{1,3}(?![A-Za-z0-9]))?"
     r"(?:\s*\([0-9a-zA-Z]+\))*"
 )
 
 # Words that introduce a section reference
-_SEC_WORD = r"(?:sections?|sec\.?|ss\.?|s\.|u/s|under\s+section)"
+# "s 420" (no period) is a section word only when a number follows; "§"/"§§"
+# are matched separately because a word boundary cannot precede them.
+_SEC_WORD = (r"(?:(?:(?<!['\u2019])\b(?:sections?|sec\.?|ss\.?|s\.|s(?=\s*\d)|u/s"
+             r"|under\s+section))|§§?)")
+# P3 (act first) must not treat "§" as its section word: "the Bharatiya Nyaya
+# Sanhita §318, §7777" is a list for P4B, and P3 claiming "§318" alone left
+# "§7777" to the weaker bare-reference path.
+_SEC_WORD_NO_SYMBOL = (r"(?:(?<!['\u2019])\b(?:sections?|sec\.?|ss\.?|s\.|s(?=\s*\d)"
+                       r"|u/s|under\s+section))")
 # A footnote or citation marker may sit between the section number and the act
 # name ("Section 420[1] IPC"), which severed the two and defeated P1/P2.
 _FOOTNOTE = r"(?:\s*\[\d+\])?"
@@ -102,7 +117,7 @@ _NUM_ATOM = r"\d+[A-Za-z]?(?![A-Za-z])(?:\s*\([0-9a-zA-Z]+\))*"
 # and the "r/w" / "read with" conjunction are standard in Indian legal drafting
 # and were all absent, so a fabricated section joined by any of them escaped
 # extraction entirely.
-_SEP = (r"(?:\s*,\s*|\s*;\s*|\s+and\s+|\s*&\s*|\s+to\s+|\s*/\s*"
+_SEP = (r"(?:\s*,\s*|\s*;\s*|\s+and\s+|\s+or\s+|\s*&\s*|\s+to\s+|\s*/\s*"
         r"|\s+r/w\s+|\s+rw\s+|\s+read\s+with\s+|\s*[-\u2013]\s*)")
 
 
@@ -194,14 +209,14 @@ def _resolve_act(surface: str) -> Optional[str]:
 # --- Patterns, tried in order -------------------------------------------------
 # P1: "Section 420 of the Indian Penal Code" / "s.420 of the IPC"
 _P1 = re.compile(
-    rf"\b{_SEC_WORD}\s*\(?\s*(?P<num>{_NUM})\s*\)?{_FOOTNOTE}"
+    rf"{_SEC_WORD}\s*\(?\s*(?P<num>{_NUM})\s*\)?{_FOOTNOTE}"
     rf"\s*(?:,)?\s*of\s+(?:the\s+)?(?P<act>{_ACT_PATTERN})(?!\w)",
     re.IGNORECASE,
 )
 # P2: "Section 420 IPC" / "Section 420, IPC" / "u/s 302 IPC"
 _P2 = re.compile(
-    rf"\b{_SEC_WORD}\s*\(?\s*(?P<num>{_NUM})\s*\)?{_FOOTNOTE}"
-    rf"\s*(?:,|\s)\s*(?P<act>{_ACT_PATTERN})(?!\w)",
+    rf"{_SEC_WORD}\s*\(?\s*(?P<num>{_NUM})\s*\)?{_FOOTNOTE}"
+    rf"\s*(?:,|\s)\s*\(?\s*(?P<act>{_ACT_PATTERN})(?!\w)",
     re.IGNORECASE,
 )
 # P3: "IPC Section 420" / "BNS s. 103" / "the Indian Penal Code (Section 500)"
@@ -219,8 +234,8 @@ _P2 = re.compile(
 # the section went unextracted entirely once P4 stopped misreading the year
 # itself as the section number.
 _P3 = re.compile(
-    rf"\b(?P<act>{_ACT_PATTERN})\s*(?:,)?\s*(?:(?:18|19|20)\d{{2}}\s*,?\s*)?"
-    rf"\(?\s*{_SEC_WORD}\s*(?P<num>{_NUM})\s*\)?",
+    rf"\b(?P<act>{_ACT_PATTERN})(?:['\u2019]s)?\s*(?:,)?\s*(?:(?:18|19|20)\d{{2}}\s*,?\s*)?"
+    rf"\(?\s*{_SEC_WORD_NO_SYMBOL}\s*(?P<num>{_NUM})\s*\)?",
     re.IGNORECASE,
 )
 # P4: "IPC 420" / "IPC §420" / "BNS §103(1)"
@@ -276,9 +291,9 @@ _P5 = re.compile(rf"\b{_ART_WORD}\s*(?P<num>{_NUM})", re.IGNORECASE)
 # verifier's existence check -- a hole in the guarantee rather than a gap in
 # coverage. P0 is tried first so it claims the whole span.
 _P0 = re.compile(
-    rf"\b(?:sections?|secs?\.?|ss\.?|arts?\.?|articles?)\s*"
+    rf"(?:\b(?:sections?|secs?\.?|ss\.?|arts?\.?|articles?)|§§?)\s*"
     rf"(?P<list>{_NUM}(?:{_SEP}{_NUM})+)"
-    rf"\s*(?:,)?\s*(?:of\s+(?:the\s+)?)?(?P<act>{_ACT_PATTERN})(?!\w)",
+    rf"\s*(?:,)?\s*\(?\s*(?:of\s+(?:the\s+)?)?(?P<act>{_ACT_PATTERN})(?!\w)",
     re.IGNORECASE,
 )
 # P0B: ACT-FIRST enumeration -- "IPC sections 302 and 304", "BNS ss. 103, 105".
@@ -286,8 +301,8 @@ _P0 = re.compile(
 # the FIRST number only, so every later member of the list -- including a
 # fabricated one -- was silently dropped rather than partially reported.
 _P0B = re.compile(
-    rf"\b(?P<act>{_ACT_PATTERN})\s*(?:,)?\s*"
-    rf"(?:sections?|secs?\.?|ss\.?|arts?\.?|articles?)\s*"
+    rf"\b(?P<act>{_ACT_PATTERN})(?:['\u2019]s)?\s*(?:,)?\s*"
+    rf"(?:\b(?:sections?|secs?\.?|ss\.?|arts?\.?|articles?)|§§?)\s*"
     rf"(?P<list>{_NUM}(?:{_SEP}{_NUM})+)",
     re.IGNORECASE,
 )
@@ -299,7 +314,7 @@ _P0_ART = re.compile(
 )
 _RANGE_SEP = re.compile(r"\s+to\s+|\s*[-\u2013]\s*", re.IGNORECASE)
 _LIST_SPLIT = re.compile(
-    r"\s*,\s*|\s*;\s*|\s+and\s+|\s*&\s*|\s*/\s*"
+    r"\s*,\s*|\s*;\s*|\s+and\s+|\s+or\s+|\s*&\s*|\s*/\s*"
     r"|\s+r/w\s+|\s+rw\s+|\s+read\s+with\s+", re.IGNORECASE)
 
 
@@ -331,7 +346,20 @@ def _expand_list(raw: str):
     return out
 
 
-_PATTERNS = [_P0, _P0B, _P1, _P2, _P3, _P4B, _P4]
+# P6: a number directly followed by an act, with no section word -- "charged
+# under 302 IPC", and the second member of a mixed-act list, "Sections 198
+# CrPC and 219 BNSS" (found in live gpt-oss-120b output: the residual scan
+# stripped it, correctly but at the cost of a valid citation). Section numbers
+# in these Acts are below 1000, so the number is limited to three digits:
+# a year beside an act name is never read as a section by this pattern.
+_P6 = re.compile(
+    rf"(?<![\w.§/\-])(?P<num>\d{{1,3}}[A-Z]{{0,2}}(?![\w])(?:\s*\([0-9a-zA-Z]+\))*)"
+    rf"\s+(?P<act>{_ACT_PATTERN})(?!\w)",
+    re.IGNORECASE,
+)
+
+_PATTERNS = [_P0, _P0B, _P1, _P2, _P3, _P4B, _P4, _P6]
+_ACT_BEFORE = re.compile(rf"(?:{_ACT_PATTERN})['\u2019]?s?[\s*_`]*$", re.IGNORECASE)
 
 # "IPC 1860", "BNS 2023", "the IT Act 2000": an act name followed by its own
 # enactment year is not a section reference, but the bare act-first patterns
@@ -363,6 +391,18 @@ def _is_year_not_section(scan: str, m, pat) -> bool:
 
 
 def extract_citations(text: str) -> List[Citation]:
+    # Pure in `text`, and called several times per sentence (the verifier,
+    # the unresolved-act and bare-reference extractors, both repair rules):
+    # memoised so each sentence is parsed once.
+    return list(_extract_citations_cached(text))
+
+
+@lru_cache(maxsize=8192)
+def _extract_citations_cached(text: str):
+    return tuple(_extract_citations(text))
+
+
+def _extract_citations(text: str) -> List[Citation]:
     """
     Extract and normalise every statutory reference in `text`.
 
@@ -385,7 +425,22 @@ def extract_citations(text: str) -> List[Citation]:
     for pat in _PATTERNS:
         for m in pat.finditer(scan):
             s, e = m.span()
+            # A span never ends in whitespace: P3's optional closing
+            # parenthesis let "IPC Section 302 " carry its trailing space, and
+            # repair rule R2, splicing by offset, then glued the next word to
+            # its own closing parenthesis ("(formerly IPC section 302
+            # )punishes"). Found by the fail-closed probe set's corruption check.
+            e = s + len(scan[s:e].rstrip())
             if overlaps(s, e):
+                continue
+            # A section symbol belongs to the act written BEFORE it: in
+            # "BNSS \u00a7 401, CRPC \u00a7 360", P1/P2 (section word, then act)
+            # read "\u00a7 401, CRPC" as CrPC 401, and repair R2 then rewrote
+            # that misreading into the answer (found in the support labelling
+            # of the second live round). When an act name immediately precedes
+            # the symbol, the number is that act's.
+            if (pat in (_P1, _P2) and scan[s:e].lstrip().startswith("§")
+                    and _ACT_BEFORE.search(scan[max(0, s - 60):s])):
                 continue
             act = _resolve_act(m.group("act"))
             if act is None:
@@ -426,7 +481,143 @@ def extract_citations(text: str) -> List[Citation]:
         claimed.append((s, e))
 
     found.sort(key=lambda c: c.start)
-    return found
+    return _attach_pinpoint_prefixes(scan, text, found)
+
+
+# "clause (9) of Article 22", "sub-clause (a) of clause (1) of Article 19",
+# "sub-section (2) of section 41 of the CrPC". The pinpoint is written BEFORE
+# the citation, so every pattern above matched only "Article 22" and the
+# fabricated clause was silently dropped: the sentence then validated against
+# a real article, a false VALIDATION of the D11 kind rather than a blind spot.
+# Found in the 2026-10 fail-closed audit. The labels are moved onto the
+# citation's key ("CONST§22(9)"), so MetadataDB.resolve checks them against
+# the provision's own text exactly as it checks "Article 22(9)".
+_PINPOINT_PREFIX = re.compile(
+    r"(?:sub-?sections?|sub-?clauses?|clauses?|paragraphs?|provisos?\s+to)\s*"
+    r"(?P<labels>(?:\(\s*[0-9a-zA-Z]{1,5}\s*\)\s*)+)of\s+(?:the\s+)?$",
+    re.IGNORECASE)
+_LABEL = re.compile(r"\(\s*([0-9a-zA-Z]{1,5})\s*\)")
+
+
+def _attach_pinpoint_prefixes(scan: str, text: str, found: List[Citation]):
+    starts = {}
+    for c in found:
+        starts[c.start] = starts.get(c.start, 0) + 1
+    out = []
+    for c in found:
+        if starts[c.start] > 1:          # a list member: ambiguous, leave it
+            out.append(c)
+            continue
+        start, outer_first = c.start, []
+        while True:
+            m = _PINPOINT_PREFIX.search(scan[max(0, start - 80):start])
+            if not m:
+                break
+            # "sub-clause (a) of clause (1) of": the nearer prefix is the
+            # outer label, so labels accumulate outermost-first.
+            outer_first = _LABEL.findall(m.group("labels")) + outer_first
+            start = max(0, start - 80) + m.start()
+        if not outer_first:
+            out.append(c)
+            continue
+        section = c.section + "".join(f"({l})" for l in _nest(outer_first))
+        out.append(Citation(act=c.act, section=section, raw=text[start:c.end],
+                            start=start, end=c.end))
+    return out
+
+
+def _nest(labels_read_order: List[str]) -> List[str]:
+    """Labels as read left to right ("sub-clause (a) of clause (1) of") are
+    innermost first; a key lists them outermost first ("19(1)(a)")."""
+    return list(reversed(labels_read_order))
+
+
+# ---------------------------------------------------------------------------
+# BARE references: a section cited with NO act name -- "Section 41 permits
+# arrest without a warrant [3]", "under section 7777 the court may...".
+# Every pattern above requires an act name, so before the 2026-10 fail-closed
+# audit a bare section was never extracted and therefore never checked: a
+# fabricated "Section 7777 [1]" passed V2 untouched. Generators write bare
+# sections constantly once the act has been named. The verifier resolves
+# these against the act context (the acts of the chunks the sentence's
+# markers point at, then the act most recently cited in the answer); a bare
+# reference it cannot place in any act is stripped, not passed.
+# ---------------------------------------------------------------------------
+_BARE = re.compile(
+    rf"(?:(?<!['\u2019])\b(?:sections?|secs?\.?|ss\.?|s\.|s(?=\s*\d)|u/s)|§§?)\s*"
+    rf"(?P<list>{_NUM_ATOM}(?:{_SEP}{_NUM_ATOM})*)",
+    re.IGNORECASE)
+# Pinpoint with no section at all: "under sub-section (2)", "clause (b)".
+_BARE_SUB = re.compile(
+    r"\b(?:sub-?sections?|sub-?clauses?|clauses?)\s*"
+    r"(?P<labels>(?:\(\s*[0-9a-zA-Z]{1,5}\s*\)\s*)+)(?!\s*of\s)",
+    re.IGNORECASE)
+
+
+_ACT_MENTION = re.compile(rf"\b(?P<act>{_ACT_PATTERN})(?!\w)", re.IGNORECASE)
+
+
+def extract_act_mentions(text: str) -> List[tuple]:
+    """(act code, offset) for every act the text names, with or without a
+    section -- "Under the Criminal Procedure Code (CRPC) ... Section 41"
+    places the bare "Section 41" in the CrPC."""
+    out = []
+    for m in _ACT_MENTION.finditer(_sanitise(text)):
+        code = _resolve_act(m.group("act"))
+        if code:
+            out.append((code, m.start()))
+    return out
+
+
+@dataclass(frozen=True)
+class BareReference:
+    """A section (or sub-division) reference with no act named."""
+    section: str        # "41", "41(1)(b)"; for a pinpoint-only ref, "(2)"
+    raw: str
+    start: int
+    end: int
+    pinpoint_only: bool = False
+
+
+def extract_bare_references(text: str) -> List[BareReference]:
+    scan = _sanitise(text)
+    claimed = [(c.start, c.end) for c in extract_citations(text)]
+    claimed += [(r.start, r.end) for r in extract_unresolved_act_refs(text)]
+    out: List[BareReference] = []
+
+    def free(s, e):
+        return not any(not (e <= cs or s >= ce) for cs, ce in claimed)
+
+    for m in _BARE.finditer(scan):
+        s, e = m.span()
+        if not free(s, e):
+            continue
+        nums = _expand_list(m.group("list"))
+        # "sub-section (1) of section 102", "Clauses (3) of \u00a722": the same
+        # written-before pinpoint as for a citation with its act named.
+        labels, start = [], s
+        if len(nums) == 1:
+            while True:
+                pm = _PINPOINT_PREFIX.search(scan[max(0, start - 80):start])
+                if not pm:
+                    break
+                labels = _LABEL.findall(pm.group("labels")) + labels
+                start = max(0, start - 80) + pm.start()
+        for num in nums:
+            sec = _clean_section(num) + "".join(f"({l})" for l in _nest(labels))
+            out.append(BareReference(section=sec, raw=text[start:e],
+                                     start=start, end=e))
+        claimed.append((start, e))
+    for m in _BARE_SUB.finditer(scan):
+        s, e = m.span()
+        if not free(s, e):
+            continue
+        labels = "".join(f"({l})" for l in _LABEL.findall(m.group("labels")))
+        out.append(BareReference(section=labels, raw=text[s:e], start=s, end=e,
+                                 pinpoint_only=True))
+        claimed.append((s, e))
+    out.sort(key=lambda r: r.start)
+    return out
 
 
 def normalise(surface: str) -> Optional[str]:
@@ -524,7 +715,38 @@ def _name_resolves(name: str) -> bool:
     return False
 
 
+def act_names_before(text: str, pos: int) -> Optional[tuple]:
+    """The act named nearest before `pos`: (code, end) for a corpus act,
+    (None, end) for a NAMED act outside the corpus ("the Indian Telegraph
+    Act"), or None. A bare "\u00a7\u00a7 5-7" right after "the Indian Telegraph Act,
+    1885" belongs to that act -- not to the Information Technology Act named
+    after it, which is where it was placed before this check (found by the
+    independent audit of the second live round)."""
+    scan = _sanitise(text[:pos])
+    best = None
+    for m in _ACT_MENTION.finditer(scan):
+        code = _resolve_act(m.group("act"))
+        if code and (best is None or m.end() > best[1]):
+            best = (code, m.end())
+    for m in re.finditer(_ACT_NAME, scan):
+        name = m.group(0).strip()
+        if _is_generic(name) or _name_resolves(name):
+            continue
+        if best is None or m.end() > best[1]:
+            best = (None, m.end())
+    return best
+
+
 def extract_unresolved_act_refs(text: str) -> List[UnresolvedActRef]:
+    return list(_unresolved_cached(text))
+
+
+@lru_cache(maxsize=8192)
+def _unresolved_cached(text: str):
+    return tuple(_extract_unresolved_act_refs(text))
+
+
+def _extract_unresolved_act_refs(text: str) -> List[UnresolvedActRef]:
     scan = _sanitise(text)
     claimed = [(c.start, c.end) for c in extract_citations(text)]
     out: List[UnresolvedActRef] = []
